@@ -10,6 +10,8 @@ struct EditorServices {
     var definition: @MainActor (Int) -> Void
     var references: @MainActor (Int) -> Void
     var rename: @MainActor (Int) -> Void
+    /// Zero-based line clicked in the gutter.
+    var toggleBreakpoint: @MainActor (Int) -> Void
     var caretMoved: @MainActor (NSRange) -> Void
 }
 
@@ -24,6 +26,9 @@ struct CodeEditorView: NSViewRepresentable {
     var highlightCode: Bool
     var isEditable: Bool
     var diagnostics: [Diagnostic]
+    var breakpointLines: Set<Int> = []
+    /// Zero-based line where the debugger is paused in this document.
+    var executionLine: Int?
     var reveal: RevealTarget?
     var services: EditorServices
     var onChange: (String) -> Void
@@ -87,6 +92,7 @@ struct CodeEditorView: NSViewRepresentable {
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
 
+        ruler.onToggleBreakpoint = { [weak coordinator] line in coordinator?.parent.services.toggleBreakpoint(line) }
         coordinator.textView = textView
         coordinator.ruler = ruler
         coordinator.documentID = documentID
@@ -109,9 +115,12 @@ struct CodeEditorView: NSViewRepresentable {
         } else if textView.string != text {
             // Replaced from outside (e.g. reloaded); typing never gets here since text already matches.
             coordinator.replaceText(text)
-        } else if coordinator.appliedDiagnostics != diagnostics || coordinator.appliedHighlightCode != highlightCode {
+        } else if coordinator.appliedDiagnostics != diagnostics || coordinator.appliedHighlightCode != highlightCode
+                    || coordinator.appliedExecutionLine != executionLine {
             coordinator.applyStyling()
         }
+
+        coordinator.ruler?.setDebugState(breakpoints: breakpointLines, executionLine: executionLine)
 
         if let reveal, reveal.id != coordinator.lastRevealID {
             coordinator.lastRevealID = reveal.id
@@ -136,6 +145,7 @@ struct CodeEditorView: NSViewRepresentable {
         weak var textView: CodeTextView?
         var appliedDiagnostics: [Diagnostic] = []
         var appliedHighlightCode = false
+        var appliedExecutionLine: Int?
         var lastRevealID: UUID?
         weak var ruler: LineNumberRuler?
         var documentID = ""
@@ -657,6 +667,13 @@ struct CodeEditorView: NSViewRepresentable {
             }
             storage.endEditing()
 
+            if let line = parent.executionLine, line < index.lineCount {
+                let start = index.lineStarts[line]
+                let end = line + 1 < index.lineCount ? index.lineStarts[line + 1] : storage.length
+                storage.addAttribute(.backgroundColor, value: NSColor.systemGreen.withAlphaComponent(0.22),
+                                     range: NSRange(location: start, length: max(end - start, 0)))
+            }
+            appliedExecutionLine = parent.executionLine
             ruler?.setDiagnostics(parent.diagnostics)
             appliedDiagnostics = parent.diagnostics
             appliedHighlightCode = parent.highlightCode

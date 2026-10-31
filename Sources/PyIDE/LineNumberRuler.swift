@@ -8,6 +8,10 @@ final class LineNumberRuler: NSRulerView {
     private var lineStarts: [Int] = [0]
     /// Worst severity per zero-based line.
     private var lineMarkers: [Int: Diagnostic.Severity] = [:]
+    private var breakpointLines: Set<Int> = []
+    private var executionLine: Int?
+    /// Called with a zero-based line when its number is clicked.
+    var onToggleBreakpoint: ((Int) -> Void)?
 
     private static let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
     private static let boldFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
@@ -45,6 +49,13 @@ final class LineNumberRuler: NSRulerView {
         }
     }
 
+    func setDebugState(breakpoints: Set<Int>, executionLine: Int?) {
+        guard breakpoints != breakpointLines || executionLine != self.executionLine else { return }
+        breakpointLines = breakpoints
+        self.executionLine = executionLine
+        needsDisplay = true
+    }
+
     private static func thickness(forLineCount count: Int) -> CGFloat {
         let digits = max(String(count).count, 3)
         let digitWidth = ("8" as NSString).size(withAttributes: [.font: font]).width
@@ -76,16 +87,46 @@ final class LineNumberRuler: NSRulerView {
             let yInText = fragment.minY + origin.y
             let y = convert(NSPoint(x: 0, y: yInText), from: textView).y
             let isCaret = line == caretLine
+            let hasBreakpoint = breakpointLines.contains(line)
+            if hasBreakpoint {
+                // Xcode-style tag: rounded body with a pointed right end.
+                let rect = NSRect(x: 2, y: y + 1, width: ruleThickness - 5, height: fragment.height - 2)
+                let tip: CGFloat = 5
+                let path = NSBezierPath()
+                path.move(to: NSPoint(x: rect.minX + 3, y: rect.minY))
+                path.line(to: NSPoint(x: rect.maxX - tip, y: rect.minY))
+                path.line(to: NSPoint(x: rect.maxX, y: rect.midY))
+                path.line(to: NSPoint(x: rect.maxX - tip, y: rect.maxY))
+                path.line(to: NSPoint(x: rect.minX + 3, y: rect.maxY))
+                path.appendArc(withCenter: NSPoint(x: rect.minX + 3, y: rect.maxY - 3), radius: 3, startAngle: 90, endAngle: 180)
+                path.line(to: NSPoint(x: rect.minX, y: rect.minY + 3))
+                path.appendArc(withCenter: NSPoint(x: rect.minX + 3, y: rect.minY + 3), radius: 3, startAngle: 180, endAngle: 270)
+                path.close()
+                NSColor.systemBlue.setFill()
+                path.fill()
+            }
+            if line == executionLine {
+                let size: CGFloat = 8
+                let midY = y + fragment.height / 2
+                let arrow = NSBezierPath()
+                arrow.move(to: NSPoint(x: ruleThickness - 3 - size, y: midY - size / 2 - 1))
+                arrow.line(to: NSPoint(x: ruleThickness - 3, y: midY))
+                arrow.line(to: NSPoint(x: ruleThickness - 3 - size, y: midY + size / 2 + 1))
+                arrow.close()
+                NSColor.systemGreen.setFill()
+                arrow.fill()
+            }
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: isCaret ? Self.boldFont : Self.font,
-                .foregroundColor: isCaret ? NSColor.labelColor : NSColor.tertiaryLabelColor,
+                .font: isCaret || hasBreakpoint ? Self.boldFont : Self.font,
+                .foregroundColor: hasBreakpoint ? NSColor.white : isCaret ? NSColor.labelColor : NSColor.tertiaryLabelColor,
             ]
             let label = String(line + 1) as NSString
             let size = label.size(withAttributes: attributes)
             let baselineOffset = (fragment.height - size.height) / 2
-            label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y + baselineOffset), withAttributes: attributes)
+            let rightInset: CGFloat = hasBreakpoint || line == executionLine ? 12 : 8
+            label.draw(at: NSPoint(x: ruleThickness - size.width - rightInset, y: y + baselineOffset), withAttributes: attributes)
 
-            if let severity = lineMarkers[line] {
+            if !hasBreakpoint, let severity = lineMarkers[line] {
                 let color: NSColor = switch severity {
                 case .error: .systemRed
                 case .warning: .systemYellow
@@ -130,9 +171,17 @@ final class LineNumberRuler: NSRulerView {
         let glyph = layoutManager.glyphIndex(for: containerPoint, in: textView.textContainer!)
         let charIndex = layoutManager.characterIndexForGlyph(at: glyph)
         let ns = textView.string as NSString
-        let lineRange = ns.length == 0 ? NSRange(location: 0, length: 0)
-            : ns.lineRange(for: NSRange(location: min(charIndex, ns.length), length: 0))
-        textView.window?.makeFirstResponder(textView)
-        textView.setSelectedRange(lineRange)
+        var lineNumber = line(containing: charIndex)
+        // Below the last line of text (after a trailing newline) is the empty last line.
+        let extra = layoutManager.extraLineFragmentRect
+        if !extra.isEmpty, containerPoint.y >= extra.minY, ns.length > 0 { lineNumber = lineStarts.count - 1 }
+        if let onToggleBreakpoint {
+            onToggleBreakpoint(lineNumber)
+        } else {
+            let lineRange = ns.length == 0 ? NSRange(location: 0, length: 0)
+                : ns.lineRange(for: NSRange(location: min(charIndex, ns.length), length: 0))
+            textView.window?.makeFirstResponder(textView)
+            textView.setSelectedRange(lineRange)
+        }
     }
 }

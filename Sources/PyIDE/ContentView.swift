@@ -30,11 +30,16 @@ struct ContentView: View {
                     Label("Run", systemImage: "play.fill")
                 }
                 .help("Run the current file (⌘R)")
+                Button { Task { await workspace.startDebugging() } } label: {
+                    Label("Debug", systemImage: "ladybug")
+                }
+                .help("Debug the current file (⇧⌘D)")
+                .disabled(workspace.isDebugging)
                 Button { workspace.stopRun() } label: {
                     Label("Stop", systemImage: "stop.fill")
                 }
                 .help("Stop (⌘.)")
-                .disabled(!workspace.isRunning)
+                .disabled(!workspace.isRunning && !workspace.isDebugging)
             }
         }
         .task { await workspace.handleLaunchArguments() }
@@ -110,6 +115,8 @@ struct EditorArea: View {
                         highlightCode: workspace.isPythonFile,
                         isEditable: !workspace.isReadOnly,
                         diagnostics: workspace.currentDiagnostics,
+                        breakpointLines: workspace.currentBreakpoints,
+                        executionLine: workspace.currentExecutionLine,
                         reveal: workspace.revealTarget,
                         services: EditorServices(
                             completions: { await workspace.completions(at: $0) },
@@ -118,6 +125,7 @@ struct EditorArea: View {
                             definition: { offset in Task { await workspace.jumpToDefinition(at: offset) } },
                             references: { offset in Task { await workspace.findReferences(at: offset) } },
                             rename: { offset in Task { await workspace.renameSymbol(at: offset) } },
+                            toggleBreakpoint: { workspace.toggleBreakpoint(line: $0) },
                             caretMoved: {
                                 workspace.caretOffset = $0.location
                                 workspace.selectedRange = $0
@@ -252,6 +260,7 @@ struct BottomPanel: View {
                     Text("Problems (\(workspace.allProblems.count))").tag(BottomTab.problems)
                     Text("Output").tag(BottomTab.output)
                     Text("REPL").tag(BottomTab.repl)
+                    Text(workspace.isDebugging ? "Debug ●" : "Debug").tag(BottomTab.debug)
                     if !workspace.references.isEmpty || workspace.bottomTab == .references {
                         Text("References (\(workspace.references.count))").tag(BottomTab.references)
                     }
@@ -284,6 +293,7 @@ struct BottomPanel: View {
             case .output: OutputView()
             case .references: ReferencesList()
             case .repl: REPLView()
+            case .debug: DebugPanel()
             }
         }
     }

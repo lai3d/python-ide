@@ -3,7 +3,13 @@ import PyIDECore
 import Observation
 
 enum BottomTab: Hashable {
-    case problems, output, references, repl
+    case problems, output, references, repl, debug
+}
+
+/// Where a paused debugger is (normalized path, zero-based line).
+struct ExecutionLocation: Equatable {
+    let key: String
+    let line: Int
 }
 
 /// One result of Find References, with its source line for context.
@@ -75,6 +81,11 @@ final class Workspace {
     @ObservationIgnored var caretOffset = 0
     /// Current editor selection (UTF-16), reported by the editor.
     @ObservationIgnored var selectedRange = NSRange(location: 0, length: 0)
+
+    /// Breakpoints per normalized path, as zero-based line numbers.
+    private(set) var breakpoints: [String: Set<Int>] = [:]
+    private(set) var debugSession: DebugSession?
+    private(set) var executionLocation: ExecutionLocation?
 
     private(set) var replOutput = ""
     private(set) var isREPLRunning = false
@@ -161,6 +172,9 @@ final class Workspace {
 
     func openFolder(_ url: URL) async {
         guard confirmDiscardOrSave(documents.filter(\.isDirty)) else { return }
+        stopDebugging()
+        debugSession = nil
+        breakpoints = [:]
         stopREPL()
         replOutput = ""
         await stopLanguageServer()
@@ -790,6 +804,10 @@ final class Workspace {
     }
 
     func stopRun() {
+        if isDebugging, runProcess == nil {
+            stopDebugging()
+            return
+        }
         runProcess?.interrupt()  // SIGINT: Python raises KeyboardInterrupt
     }
 
@@ -808,6 +826,120 @@ final class Workspace {
             process.terminationHandler = { continuation.resume(returning: $0.terminationStatus == 0) }
             do { try process.run() } catch { continuation.resume(returning: false) }
         }
+    }
+
+    // MARK: - Debugging
+
+    var isDebugging: Bool { debugSession?.isActive ?? false }
+
+    var currentBreakpoints: Set<Int> { breakpoints[currentDocumentID] ?? [] }
+
+    var currentExecutionLine: Int? {
+        guard let executionLocation, executionLocation.key == currentDocumentID else { return nil }
+        return executionLocation.line
+    }
+
+    func toggleBreakpoint(line: Int) {
+        guard let currentFile, Self.isPython(currentFile) else { return }
+        let key = currentDocumentID
+        var lines = breakpoints[key] ?? []
+        if lines.contains(line) { lines.remove(line) } else { lines.insert(line) }
+        breakpoints[key] = lines.isEmpty ? nil : lines
+        debugSession?.setBreakpoints(path: key, lines: lines.map { $0 + 1 })
+    }
+
+    func toggleBreakpointAtCaret() {
+        toggleBreakpoint(line: LineIndex(text).position(of: caretOffset).line)
+    }
+
+    func clearAllBreakpoints() {
+        for key in breakpoints.keys { debugSession?.setBreakpoints(path: key, lines: []) }
+        breakpoints = [:]
+    }
+
+    /// Debugs the current file (or the project's entry point) under debugpy.
+    func startDebugging() async {
+        guard rootURL != nil, !isDebugging else { return }
+        guard let python = interpreter else {
+            flashStatus("Python not found — choose an interpreter")
+            return
+        }
+        saveAllNow()
+        guard let program = runTarget(), let cwd = rootURL else {
+            flashStatus("Nothing to debug: open a .py file (or add main.py)")
+            return
+        }
+        let environment = ToolLocator.environment(interpreter: python)
+        let hasOwnDebugpy = await Self.succeeds(python, ["-c", "import debugpy"], environment: environment)
+        if !hasOwnDebugpy && !DebugpyLocator.isInstalledInSupportDirectory {
+            guard await installDebugpy(python: python) else { return }
+        }
+
+        let session = DebugSession(
+            breakpoints: Dictionary(uniqueKeysWithValues: breakpoints.map { ($0.key, $0.value.map { $0 + 1 }) }),
+            programName: program.lastPathComponent)
+        session.onLocation = { [weak self, weak session] location in
+            guard let self, self.debugSession === session else { return }
+            guard let (path, line) = location else {
+                self.executionLocation = nil
+                return
+            }
+            let url = URL(fileURLWithPath: path)
+            self.executionLocation = ExecutionLocation(key: Self.key(for: url), line: max(line - 1, 0))
+            self.navigate(to: url, position: TextPosition(line: max(line - 1, 0), character: 0))
+            self.bottomTab = .debug
+        }
+        session.onEnd = { [weak self, weak session] in
+            guard let self, self.debugSession === session else { return }
+            self.executionLocation = nil
+        }
+        debugSession = session
+        bottomTab = .debug
+        session.start(python: python, program: program, cwd: cwd, environment: environment,
+                      useSupportDirectory: !hasOwnDebugpy)
+    }
+
+    func stopDebugging() {
+        debugSession?.stop()
+    }
+
+    /// Asks, then installs debugpy into PyIDE's support folder, streaming pip/uv output.
+    private func installDebugpy(python: URL) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Install debugpy?"
+        alert.informativeText = "Debugging uses Microsoft's debugpy. PyIDE can download it from PyPI into "
+            + "\(DebugpyLocator.supportDirectory.path) (your project and interpreter are not modified)."
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+
+        let (executable, arguments) = DebugpyLocator.installCommand(interpreter: python)
+        output = "$ \(executable.lastPathComponent) \(arguments.joined(separator: " "))\n"
+        bottomTab = .output
+        let status: Int32 = await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = arguments
+            process.environment = ToolLocator.environment(interpreter: python)
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty { handle.readabilityHandler = nil; return }
+                let chunk = String(decoding: data, as: UTF8.self)
+                Task { @MainActor in self.appendOutput(chunk) }
+            }
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            do { try process.run() } catch {
+                Task { @MainActor in self.appendOutput("Failed to run installer: \(error.localizedDescription)\n") }
+                continuation.resume(returning: -1)
+            }
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        let ok = status == 0 && DebugpyLocator.isInstalledInSupportDirectory
+        appendOutput(ok ? "\ndebugpy installed.\n" : "\nInstalling debugpy failed (status \(status)).\n")
+        return ok
     }
 
     // MARK: - REPL
