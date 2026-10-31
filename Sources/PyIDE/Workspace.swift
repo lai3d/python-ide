@@ -1112,6 +1112,21 @@ final class Workspace {
         updateBreakpoints(lines, for: key)
     }
 
+    /// Pause only on some hits: "3" (the third), ">= 3", "% 2" (every second).
+    func editHitCount(line: Int) {
+        let key = currentDocumentID
+        guard let value = Self.prompt(
+            title: "Hit count (line \(line + 1))",
+            message: "Pause only on matching hits: 3 (the third hit), >= 3, or % 2 (every second hit). "
+                + "Leave empty to pause every time.",
+            placeholder: "e.g. >= 3", initial: breakpoints[key]?[line]?.hitCondition ?? "") else { return }
+        var lines = breakpoints[key] ?? [:]
+        var spec = lines[line] ?? BreakpointSpec()
+        spec.hitCondition = value
+        lines[line] = spec
+        updateBreakpoints(lines, for: key)
+    }
+
     private static func prompt(title: String, message: String, placeholder: String, initial: String) -> String? {
         let alert = NSAlert()
         alert.messageText = title

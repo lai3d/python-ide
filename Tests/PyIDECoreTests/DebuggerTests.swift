@@ -239,4 +239,60 @@ final class EventInbox: @unchecked Sendable {
         #expect(watched["result"]?.stringValue == "30")
         _ = try? await client.request("disconnect", arguments: ["terminateDebuggee": true])
     }
+
+    /// hitCondition pauses on the Nth hit; setVariable changes a value the program then uses.
+    @Test(.enabled(if: canRun), .timeLimit(.minutes(1)))
+    func hitCountAndSetVariable() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pyide-dbg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let program = dir.appendingPathComponent("hits.py")
+        try "total = 0\nfor i in range(5):\n    total += i\nprint('final', total)\n".write(to: program, atomically: true, encoding: .utf8)
+
+        let python = try #require(PythonEnvironment.interpreter(for: nil))
+        let inbox = EventInbox()
+        let client = DAPClient()
+        client.onEvent = { inbox.add($0, $1) }
+        try client.start(executable: python, arguments: ["-m", "debugpy.adapter"],
+                         environment: DebugpyLocator.adapterEnvironment(base: ToolLocator.environment(), useSupportDirectory: true),
+                         currentDirectory: dir)
+        defer { client.terminate() }
+        let capabilities = try await client.request("initialize", arguments: [
+            "clientID": "pyide", "adapterID": "debugpy", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
+        ])
+        #expect(capabilities["supportsSetVariable"]?.boolValue == true)
+        #expect(capabilities["supportsHitConditionalBreakpoints"]?.boolValue == true)
+        let launch = Task {
+            try await client.request("launch", arguments: [
+                "program": .string(program.path), "cwd": .string(dir.path), "python": [.string(python.path)],
+                "console": "internalConsole", "redirectOutput": true, "justMyCode": true,
+            ])
+        }
+        _ = try await inbox.next("initialized")
+        _ = try await client.request("setBreakpoints", arguments: [
+            "source": ["path": .string(program.path)],
+            "breakpoints": [SourceBreakpoint(line: 3, spec: BreakpointSpec(hitCondition: "3")).json],
+        ])
+        _ = try await client.request("configurationDone")
+        _ = try await launch.value
+
+        // Third hit of line 3: i == 2, total == 0 + 1 = 1.
+        let stopped = try await inbox.next("stopped")
+        let thread = try #require(stopped["threadId"]?.intValue)
+        let frame = try #require(StackFrameInfo.parseAll(try await client.request("stackTrace", arguments: ["threadId": .int(thread)])).first)
+        let locals = try #require(VariableInfo.parseAll(try await client.request("scopes", arguments: ["frameId": .int(frame.id)])).first)
+        let vars = VariableInfo.parseAll(try await client.request("variables", arguments: ["variablesReference": .int(locals.reference)]))
+        #expect(vars.contains { $0.name == "i" && $0.value == "2" } && vars.contains { $0.name == "total" && $0.value == "1" },
+                "vars: \(vars)")
+
+        // Set total = 100; the loop continues from there: 100 + 2 + 3 + 4 = 109.
+        let set = try await client.request("setVariable", arguments: [
+            "variablesReference": .int(locals.reference), "name": "total", "value": "100",
+        ])
+        #expect(set["value"]?.stringValue == "100")
+        _ = try await client.request("setBreakpoints", arguments: ["source": ["path": .string(program.path)], "breakpoints": []])
+        _ = try await client.request("continue", arguments: ["threadId": .int(thread)])
+        _ = try await inbox.next("terminated")
+        #expect(inbox.output.contains("final 109"), "output: \(inbox.output)")
+    }
 }

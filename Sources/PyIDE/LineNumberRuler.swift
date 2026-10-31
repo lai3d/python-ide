@@ -13,6 +13,7 @@ final class LineNumberRuler: NSRulerView {
     private var logpointLines: Set<Int> = []
     var onEditCondition: ((Int) -> Void)?
     var onEditLogMessage: ((Int) -> Void)?
+    var onEditHitCount: ((Int) -> Void)?
     var onRemoveBreakpoint: ((Int) -> Void)?
     private var executionLine: Int?
     /// Called with a zero-based line when its number is clicked.
@@ -181,6 +182,7 @@ final class LineNumberRuler: NSRulerView {
             menu.addItem(ClosureMenuItem(conditionalLines.contains(line) ? "Edit Condition…" : "Add Condition…") { [weak self] in
                 self?.onEditCondition?(line)
             })
+            menu.addItem(ClosureMenuItem("Hit Count…") { [weak self] in self?.onEditHitCount?(line) })
             menu.addItem(ClosureMenuItem(logpointLines.contains(line) ? "Edit Log Message…" : "Make Logpoint…") { [weak self] in
                 self?.onEditLogMessage?(line)
             })

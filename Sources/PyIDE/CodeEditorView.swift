@@ -16,6 +16,7 @@ struct EditorServices {
     var applyCodeAction: @MainActor (CodeAction) -> Void = { _ in }
     var editBreakpointCondition: @MainActor (Int) -> Void = { _ in }
     var editLogMessage: @MainActor (Int) -> Void = { _ in }
+    var editHitCount: @MainActor (Int) -> Void = { _ in }
     var removeBreakpoint: @MainActor (Int) -> Void = { _ in }
     var caretMoved: @MainActor (NSRange) -> Void
 }
@@ -103,6 +104,7 @@ struct CodeEditorView: NSViewRepresentable {
         ruler.onToggleBreakpoint = { [weak coordinator] line in coordinator?.parent.services.toggleBreakpoint(line) }
         ruler.onEditCondition = { [weak coordinator] line in coordinator?.parent.services.editBreakpointCondition(line) }
         ruler.onEditLogMessage = { [weak coordinator] line in coordinator?.parent.services.editLogMessage(line) }
+        ruler.onEditHitCount = { [weak coordinator] line in coordinator?.parent.services.editHitCount(line) }
         ruler.onRemoveBreakpoint = { [weak coordinator] line in coordinator?.parent.services.removeBreakpoint(line) }
         coordinator.textView = textView
         coordinator.ruler = ruler

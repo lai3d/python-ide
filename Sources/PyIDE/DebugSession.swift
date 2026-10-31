@@ -229,6 +229,20 @@ final class DebugSession {
         return VariableInfo.parseAll(body)
     }
 
+    /// Assigns `value` (a Python expression) to a variable, then refreshes variables and watches.
+    func setVariable(_ name: String, in container: Int, to value: String) async -> String? {
+        guard state == .stopped else { return "Pause first" }
+        do {
+            _ = try await client.request("setVariable", arguments: [
+                "variablesReference": .int(container), "name": .string(name), "value": .string(value),
+            ])
+        } catch {
+            return error.localizedDescription.components(separatedBy: "failed: ").last
+        }
+        if let frame = frames.first(where: { $0.id == selectedFrameID }) { select(frame: frame) }
+        return nil
+    }
+
     /// Evaluates an expression in the selected frame (or globally while running) and logs the result.
     func evaluate(_ expression: String) {
         let trimmed = expression.trimmingCharacters(in: .whitespaces)

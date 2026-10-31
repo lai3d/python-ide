@@ -210,6 +210,7 @@ struct EditorArea: View {
                             applyCodeAction: { action in Task { await workspace.apply(action) } },
                             editBreakpointCondition: { workspace.editBreakpointCondition(line: $0) },
                             editLogMessage: { workspace.editLogMessage(line: $0) },
+                            editHitCount: { workspace.editHitCount(line: $0) },
                             removeBreakpoint: { workspace.removeBreakpoint(line: $0) },
                             caretMoved: {
                                 workspace.caretOffset = $0.location

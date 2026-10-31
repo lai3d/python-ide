@@ -5,14 +5,17 @@ import Foundation
 public struct BreakpointSpec: Sendable, Hashable {
     public var condition: String
     public var logMessage: String
+    /// Pause only on matching hits: "3" (the 3rd), ">= 3", "% 2" (every 2nd).
+    public var hitCondition: String
 
-    public init(condition: String = "", logMessage: String = "") {
+    public init(condition: String = "", logMessage: String = "", hitCondition: String = "") {
         self.condition = condition
         self.logMessage = logMessage
+        self.hitCondition = hitCondition
     }
 
     public var isLogpoint: Bool { !logMessage.isEmpty }
-    public var isConditional: Bool { !condition.isEmpty }
+    public var isConditional: Bool { !condition.isEmpty || !hitCondition.isEmpty }
 }
 
 /// A breakpoint as sent to the debug adapter (1-based line).
@@ -20,22 +23,26 @@ public struct SourceBreakpoint: Sendable, Hashable {
     public let line: Int
     public let condition: String?
     public let logMessage: String?
+    public let hitCondition: String?
 
-    public init(line: Int, condition: String? = nil, logMessage: String? = nil) {
+    public init(line: Int, condition: String? = nil, logMessage: String? = nil, hitCondition: String? = nil) {
         self.line = line
         self.condition = condition
         self.logMessage = logMessage
+        self.hitCondition = hitCondition
     }
 
     public init(line: Int, spec: BreakpointSpec) {
-        self.init(line: line, condition: spec.isConditional ? spec.condition : nil,
-                  logMessage: spec.isLogpoint ? spec.logMessage : nil)
+        self.init(line: line, condition: spec.condition.isEmpty ? nil : spec.condition,
+                  logMessage: spec.isLogpoint ? spec.logMessage : nil,
+                  hitCondition: spec.hitCondition.isEmpty ? nil : spec.hitCondition)
     }
 
     public var json: JSONValue {
         var object: [String: JSONValue] = ["line": .int(line)]
         if let condition, !condition.isEmpty { object["condition"] = .string(condition) }
         if let logMessage, !logMessage.isEmpty { object["logMessage"] = .string(logMessage) }
+        if let hitCondition, !hitCondition.isEmpty { object["hitCondition"] = .string(hitCondition) }
         return .object(object)
     }
 }

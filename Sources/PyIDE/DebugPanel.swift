@@ -150,9 +150,14 @@ struct VariablesTree: View {
 struct VariableNode: View {
     let variable: VariableInfo
     let session: DebugSession
+    /// The variablesReference this variable belongs to (nil for scopes, which can't be assigned).
+    var container: Int?
     var initiallyExpanded = false
     @State private var expanded: Bool?
     @State private var children: [VariableInfo]?
+    @State private var editing = false
+    @State private var draft = ""
+    @State private var error: String?
 
     var body: some View {
         if variable.reference > 0 {
@@ -161,7 +166,7 @@ struct VariableNode: View {
                 set: { expanded = $0 })
             ) {
                 if let children {
-                    ForEach(children) { VariableNode(variable: $0, session: session) }
+                    ForEach(children) { VariableNode(variable: $0, session: session, container: variable.reference) }
                 } else {
                     ProgressView().controlSize(.small)
                 }
@@ -181,20 +186,41 @@ struct VariableNode: View {
     private var row: some View {
         HStack(spacing: 6) {
             Text(variable.name).font(.system(.callout, design: .monospaced)).fontWeight(.medium)
-            if !variable.value.isEmpty {
+            if editing {
+                TextField("Python expression", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.callout, design: .monospaced))
+                    .onSubmit(commit)
+                    .onExitCommand { editing = false }
+            } else if !variable.value.isEmpty {
                 Text(variable.value)
                     .font(.system(.callout, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .onTapGesture(count: 2) {
+                        guard container != nil, session.isStopped else { return }
+                        draft = variable.value
+                        error = nil
+                        editing = true
+                    }
+            }
+            if let error {
+                Text(error).font(.caption).foregroundStyle(.orange).lineLimit(1)
             }
             Spacer(minLength: 4)
             if let type = variable.type, !type.isEmpty {
                 Text(type).font(.caption2).foregroundStyle(.tertiary)
             }
         }
-        .textSelection(.enabled)
-        .help("\(variable.name) = \(variable.value)")
+        .help(container == nil ? variable.name : "\(variable.name) = \(variable.value)\nDouble-click the value to change it")
+    }
+
+    private func commit() {
+        guard let container else { return }
+        let value = draft
+        editing = false
+        Task { error = await session.setVariable(variable.name, in: container, to: value) }
     }
 }
 
