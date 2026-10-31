@@ -54,6 +54,10 @@ final class Workspace {
     private(set) var output = ""
     private(set) var isRunning = false
     var bottomTab: BottomTab = .problems
+    /// Run ruff/black on ⌘S. Persisted across launches.
+    var formatOnSave: Bool = UserDefaults.standard.object(forKey: "formatOnSave") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(formatOnSave, forKey: "formatOnSave") }
+    }
     var revealTarget: RevealTarget?
     private(set) var backStack: [NavigationPoint] = []
     /// UTF-16 caret offset in the current file, reported by the editor.
@@ -238,7 +242,12 @@ final class Workspace {
     }
 
     func updateText(_ newText: String) {
-        guard let index = currentIndex, documents[index].text != newText else { return }
+        guard let index = currentIndex else { return }
+        setText(newText, at: index)
+    }
+
+    private func setText(_ newText: String, at index: Int) {
+        guard documents[index].text != newText else { return }
         documents[index].text = newText
         documents[index].isDirty = true
         documents[index].version += 1
@@ -249,12 +258,61 @@ final class Workspace {
         ])
     }
 
+    /// ⌘S: formats first when Format on Save is on.
     func save() {
-        if let index = currentIndex { save(at: index) }
+        if let index = currentIndex { save(documentID: documents[index].id) }
     }
 
+    /// Save All menu command: like ⌘S for every unsaved document.
     func saveAll() {
+        for document in documents where document.isDirty { save(documentID: document.id) }
+    }
+
+    /// Saves every unsaved document immediately, without formatting (before runs, on close/quit).
+    func saveAllNow() {
         for index in documents.indices where documents[index].isDirty { save(at: index) }
+    }
+
+    private func save(documentID id: String) {
+        guard let index = documents.firstIndex(where: { $0.id == id }) else { return }
+        let url = documents[index].url
+        guard formatOnSave, Self.isPython(url), !isReadOnly(url) else {
+            save(at: index)
+            return
+        }
+        Task {
+            await format(documentID: id, explicit: false)
+            if let index = documents.firstIndex(where: { $0.id == id }) { save(at: index) }
+        }
+    }
+
+    /// Format Document command.
+    func formatDocument() {
+        guard let index = currentIndex, !isReadOnly(documents[index].url) else { return }
+        let id = documents[index].id
+        Task { await format(documentID: id, explicit: true) }
+    }
+
+    /// Replaces the document's text with the formatter's output (an undoable edit in the editor).
+    private func format(documentID id: String, explicit: Bool) async {
+        guard let index = documents.firstIndex(where: { $0.id == id }) else { return }
+        let document = documents[index]
+        guard let formatter = CodeFormatter.locate(interpreter: interpreter) else {
+            if explicit { flashStatus("No formatter found — uv tool install ruff (or pip install black)") }
+            return
+        }
+        do {
+            let formatted = try await formatter.format(
+                document.text, file: document.url,
+                environment: ToolLocator.environment(interpreter: interpreter), currentDirectory: rootURL)
+            // Skip if the user kept typing while the formatter ran.
+            guard let index = documents.firstIndex(where: { $0.id == id }), documents[index].text == document.text else { return }
+            if formatted.isEmpty && !document.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
+            setText(formatted, at: index)
+            if explicit && formatted == document.text { flashStatus("\(formatter.name): already formatted") }
+        } catch {
+            flashStatus(error.localizedDescription)
+        }
     }
 
     @discardableResult
@@ -493,7 +551,7 @@ final class Workspace {
             bottomTab = .output
             return
         }
-        saveAll()
+        saveAllNow()
         let tools = PythonEnvironment.toolDirectories(for: python)
 
         switch action {

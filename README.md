@@ -17,6 +17,7 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
   - **completion** as you type identifiers or `.` (or press Esc): ↑/↓ to choose, ↩/⇥ to accept; auto-import edits applied
   - **hover** for signatures and docstrings
   - **go to definition**: ⌘-click or ⌃⌘J, back with ⌃⌘← (stdlib stubs / site-packages open read-only)
+- **Format on save** with ruff (or black), on by default and toggled in the *Python* menu; *Format Document* with ⇧⌥F. Formatting is a single undoable edit that keeps the caret's line/column; formatter errors (e.g. a syntax error) show in the status bar and the file is saved unformatted.
 - **Interpreter detection**: uses the project's `.venv` / `venv` / `env` if present, else `$VIRTUAL_ENV`, else `python3`; pick another from the status bar or *Python → Choose Interpreter…*. The interpreter is passed to pyright, so imports from your venv resolve.
 - Run the current file (⌘R), test with pytest or `unittest discover` (⌘U), check with `ruff check` / pyright / `compileall` (⌘B), stop (⌘. sends SIGINT)
 - Output panel with a **stdin field** while a program runs, so `input()` works (plus an EOF button)
@@ -27,7 +28,7 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
 - Swift 6 toolchain (Xcode 16 or later)
 - Python 3, plus a language server — pyright recommended:
   `npm install -g pyright` (or `uv tool install basedpyright`, `pip install python-lsp-server`)
-- Optional: `ruff` for ⌘B, `pytest` for ⌘U
+- Optional: `ruff` for formatting and ⌘B (`uv tool install ruff`), `pytest` for ⌘U
 
 PyIDE looks for tools in the interpreter's `bin` directory first, then `PATH`, `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, so it works when launched from Finder too.
 
@@ -54,7 +55,6 @@ You can also open `Package.swift` in Xcode.
 ## Roadmap
 
 - Find references, rename, signature help, code actions
-- Format on save (ruff format / black)
 - Integrated REPL panel; Jupyter notebook viewing
 - tree-sitter-python for incremental highlighting
 - Debugging via debugpy's DAP (breakpoints, stepping, variables)

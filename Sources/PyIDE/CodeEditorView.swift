@@ -140,6 +140,8 @@ struct CodeEditorView: NSViewRepresentable {
         private struct ViewState {
             var selection: NSRange
             var scrollOrigin: NSPoint
+            /// The text when the tab was left; if it changed meanwhile, its undo history is stale.
+            var text: String
         }
         private var viewStates: [String: ViewState] = [:]
         private var undoManagers: [String: UndoManager] = [:]
@@ -173,12 +175,17 @@ struct CodeEditorView: NSViewRepresentable {
             guard let textView, let scrollView = textView.enclosingScrollView else { return }
             dismissPopups()
             viewStates[documentID] = ViewState(selection: textView.selectedRange(),
-                                               scrollOrigin: scrollView.contentView.bounds.origin)
+                                               scrollOrigin: scrollView.contentView.bounds.origin,
+                                               text: textView.string)
             documentID = id
             textView.string = text
             ruler?.textDidChange()
             applyStyling()
             let length = (text as NSString).length
+            if let state = viewStates[id], state.text != text {
+                // Changed while in the background (e.g. Save All formatted it).
+                undoManagers[id]?.removeAllActions()
+            }
             if let state = viewStates[id], NSMaxRange(state.selection) <= length {
                 textView.setSelectedRange(state.selection)
                 textView.layoutManager?.ensureLayout(for: textView.textContainer!)
@@ -196,16 +203,27 @@ struct CodeEditorView: NSViewRepresentable {
             undoManagers = undoManagers.filter { ids.contains($0.key) }
         }
 
+        /// Replaces the whole buffer (e.g. with formatter output) as one undoable edit,
+        /// keeping the caret on the same line/column and the scroll position.
         func replaceText(_ text: String) {
-            guard let textView else { return }
+            guard let textView, let scrollView = textView.enclosingScrollView else { return }
             dismissPopups()
-            let selection = textView.selectedRange()
-            textView.string = text
-            undoManagers[documentID]?.removeAllActions()
-            let length = (text as NSString).length
-            textView.setSelectedRange(NSRange(location: min(selection.location, length), length: 0))
-            ruler?.textDidChange()
-            applyStyling()
+            let old = textView.string
+            let caret = LineIndex(old).position(of: textView.selectedRange().location)
+            let scrollOrigin = scrollView.contentView.bounds.origin
+            let full = NSRange(location: 0, length: (old as NSString).length)
+            if textView.isEditable, textView.shouldChangeText(in: full, replacementString: text) {
+                textView.replaceCharacters(in: full, with: text)
+                textView.didChangeText()
+            } else {
+                textView.string = text
+                undoManagers[documentID]?.removeAllActions()
+                ruler?.textDidChange()
+                applyStyling()
+            }
+            textView.setSelectedRange(NSRange(location: LineIndex(text).offset(of: caret), length: 0))
+            scrollView.contentView.scroll(to: scrollOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
 
         // MARK: Text changes

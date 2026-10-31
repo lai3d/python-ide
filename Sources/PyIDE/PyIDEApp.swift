@@ -77,6 +77,11 @@ struct PyIDEApp: App {
                 Button("Stop") { workspace.stopRun() }
                     .keyboardShortcut(".")
                 Divider()
+                Button("Format Document") { workspace.formatDocument() }
+                    .keyboardShortcut("f", modifiers: [.shift, .option])
+                    .disabled(!workspace.isPythonFile || workspace.isReadOnly)
+                Toggle("Format on Save", isOn: Bindable(workspace).formatOnSave)
+                Divider()
                 Button("Choose Interpreter…") { workspace.presentInterpreterPanel() }
                     .disabled(workspace.rootURL == nil)
                 Button("Restart Language Server") { Task { await workspace.restartLanguageServer() } }
