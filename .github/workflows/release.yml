@@ -1,0 +1,31 @@
+name: Release
+
+# Push a vX.Y.Z tag to publish PyIDE-vX.Y.Z.zip as a GitHub Release.
+# IDE Toolbox (lai3d/ide-toolbox) installs and updates from these releases.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select newest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Bundle app
+        run: VERSION="${GITHUB_REF_NAME#v}" ./scripts/bundle.sh
+      - name: Zip app
+        run: ditto -c -k --keepParent build/PyIDE.app "build/PyIDE-${GITHUB_REF_NAME}.zip"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "build/PyIDE-${GITHUB_REF_NAME}.zip" \
+            --title "PyIDE $GITHUB_REF_NAME" --generate-notes \
+            --notes "Ad-hoc signed, not notarized: right-click → Open the first time (or run xattr -dr com.apple.quarantine PyIDE.app)."
