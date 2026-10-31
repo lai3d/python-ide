@@ -36,7 +36,18 @@ final class LineNumberRuler: NSRulerView {
         guard let textView else { return }
         lineStarts = LineIndex(textView.string).lineStarts
         let thickness = Self.thickness(forLineCount: lineStarts.count)
-        if abs(thickness - ruleThickness) > 0.5 { ruleThickness = thickness }
+        if abs(thickness - ruleThickness) > 0.5 {
+            // The gutter is a content inset of the clip view: when it widens, a view scrolled to
+            // the left edge must follow the new edge or the first columns slide under the gutter.
+            let clip = scrollView?.contentView
+            let wasAtLeftEdge = clip.map { $0.bounds.origin.x <= -$0.contentInsets.left + 1 } ?? false
+            ruleThickness = thickness
+            scrollView?.tile()
+            if wasAtLeftEdge, let scrollView, let clip {
+                clip.scroll(to: NSPoint(x: -clip.contentInsets.left, y: clip.bounds.origin.y))
+                scrollView.reflectScrolledClipView(clip)
+            }
+        }
         needsDisplay = true
     }
 

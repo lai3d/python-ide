@@ -105,6 +105,12 @@ struct CodeEditorView: NSViewRepresentable {
         textView.setSelectedRange(NSRange(location: 0, length: 0))
         ruler.textDidChange()
         coordinator.applyStyling()
+        // Attaching the ruler after layout can leave the clip view scrolled under the gutter; start at the top-left.
+        DispatchQueue.main.async { [weak scrollView] in
+            guard let scrollView else { return }
+            scrollView.tile()
+            Self.scrollToTopLeft(scrollView)
+        }
         return scrollView
     }
 
@@ -139,6 +145,14 @@ struct CodeEditorView: NSViewRepresentable {
             textView.window?.makeFirstResponder(textView)
             if word.length > 0 { textView.showFindIndicator(for: word) }
         }
+    }
+
+    /// The ruler is laid out as a content inset (the clip view spans the gutter), so the
+    /// top-left scroll position is (-inset.left, -inset.top), not (0, 0).
+    static func scrollToTopLeft(_ scrollView: NSScrollView) {
+        let insets = scrollView.contentView.contentInsets
+        scrollView.contentView.scroll(to: NSPoint(x: -insets.left, y: -insets.top))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
@@ -217,7 +231,7 @@ struct CodeEditorView: NSViewRepresentable {
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             } else {
                 textView.setSelectedRange(NSRange(location: 0, length: 0))
-                textView.scrollToBeginningOfDocument(nil)
+                CodeEditorView.scrollToTopLeft(scrollView)
             }
         }
 
