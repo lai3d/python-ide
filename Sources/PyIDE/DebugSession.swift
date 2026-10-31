@@ -21,7 +21,9 @@ final class DebugSession {
 
     @ObservationIgnored private let client = DAPClient()
     @ObservationIgnored private var threadID: Int?
-    @ObservationIgnored private var breakpoints: [String: [Int]]
+    @ObservationIgnored private var breakpoints: [String: [SourceBreakpoint]]
+    /// The program itself, started by us at the adapter's request so its stdin is ours.
+    @ObservationIgnored private var debuggee: PipedProcess?
     @ObservationIgnored private var launchTask: Task<Void, Never>?
 
     /// Called when execution stops at a location (path, 1-based line), or with nil when it resumes.
@@ -30,7 +32,7 @@ final class DebugSession {
 
     let programName: String
 
-    init(breakpoints: [String: [Int]], programName: String) {
+    init(breakpoints: [String: [SourceBreakpoint]], programName: String) {
         self.breakpoints = breakpoints
         self.programName = programName
     }
@@ -43,6 +45,18 @@ final class DebugSession {
     func start(python: URL, program: URL, cwd: URL, environment: [String: String], useSupportDirectory: Bool) {
         client.onEvent = { [weak self] event, body in
             Task { @MainActor in self?.handle(event: event, body: body) }
+        }
+        let baseEnvironment = environment
+        client.onReverseRequest = { [weak self] command, arguments in
+            guard command == "runInTerminal" else { return nil }
+            let process = PipedProcess()
+            process.onOutput = { text in Task { @MainActor in self?.log(text) } }
+            let args = arguments["args"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            try process.start(arguments: args,
+                              environment: PipedProcess.environment(base: baseEnvironment, overrides: arguments["env"]),
+                              currentDirectory: arguments["cwd"]?.stringValue.map { URL(fileURLWithPath: $0) })
+            Task { @MainActor in self?.debuggee = process }
+            return ["processId": .int(Int(process.processIdentifier))]
         }
         client.onExit = { [weak self] status in
             Task { @MainActor in
@@ -68,12 +82,13 @@ final class DebugSession {
                 _ = try await client.request("initialize", arguments: [
                     "clientID": "pyide", "clientName": "PyIDE", "adapterID": "debugpy",
                     "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
-                    "supportsRunInTerminalRequest": false, "supportsVariableType": true,
+                    "supportsRunInTerminalRequest": true, "supportsVariableType": true,
                 ])
                 // debugpy replies to `launch` after configurationDone (sent on the `initialized` event).
                 _ = try await client.request("launch", arguments: [
                     "program": .string(program.path), "cwd": .string(cwd.path), "python": [.string(python.path)],
-                    "console": "internalConsole", "justMyCode": true, "redirectOutput": true,
+                    // integratedTerminal: debugpy asks us (runInTerminal) to start the program, giving us its stdin.
+                    "console": "integratedTerminal", "justMyCode": true,
                     "env": ["PYTHONUNBUFFERED": "1"],
                 ])
                 if state == .starting { state = .running }
@@ -97,6 +112,8 @@ final class DebugSession {
     private func end() {
         guard state != .ended else { return }
         state = .ended
+        debuggee?.terminate()
+        debuggee = nil
         frames = []
         scopes = []
         onLocation(nil)
@@ -106,19 +123,19 @@ final class DebugSession {
 
     // MARK: Breakpoints
 
-    func setBreakpoints(path: String, lines: [Int]) {
-        breakpoints[path] = lines
+    func setBreakpoints(path: String, _ list: [SourceBreakpoint]) {
+        breakpoints[path] = list
         guard state != .starting, state != .ended else { return }
-        client.send("setBreakpoints", arguments: Self.breakpointArguments(path: path, lines: lines))
+        client.send("setBreakpoints", arguments: Self.breakpointArguments(path: path, list))
     }
 
-    private static func breakpointArguments(path: String, lines: [Int]) -> JSONValue {
-        ["source": ["path": .string(path)], "breakpoints": .array(lines.sorted().map { ["line": .int($0)] })]
+    private static func breakpointArguments(path: String, _ list: [SourceBreakpoint]) -> JSONValue {
+        ["source": ["path": .string(path)], "breakpoints": .array(list.sorted { $0.line < $1.line }.map(\.json))]
     }
 
     private func sendConfiguration() async {
-        for (path, lines) in breakpoints {
-            _ = try? await client.request("setBreakpoints", arguments: Self.breakpointArguments(path: path, lines: lines))
+        for (path, list) in breakpoints {
+            _ = try? await client.request("setBreakpoints", arguments: Self.breakpointArguments(path: path, list))
         }
         _ = try? await client.request("setExceptionBreakpoints", arguments: ["filters": ["uncaught"]])
         _ = try? await client.request("configurationDone")
@@ -144,6 +161,20 @@ final class DebugSession {
         onLocation(nil)
         client.send(command, arguments: ["threadId": .int(threadID)])
     }
+
+    // MARK: Program input
+
+    /// Console input: evaluates while paused, otherwise goes to the program's stdin.
+    func submitConsoleInput(_ line: String) {
+        if state == .stopped {
+            evaluate(line)
+        } else if let debuggee, debuggee.isRunning {
+            log(line + "\n")
+            debuggee.send(line + "\n")
+        }
+    }
+
+    func sendEOF() { debuggee?.closeInput() }
 
     // MARK: Inspection
 

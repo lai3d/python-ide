@@ -134,4 +134,57 @@ final class EventInbox: @unchecked Sendable {
         #expect(inbox.output.contains("done [0, 1, 4]"), "output: \(inbox.output)")
         _ = try? await client.request("disconnect", arguments: ["terminateDebuggee": true])
     }
+
+    /// The debuggee is launched by us via runInTerminal, so its stdin is ours and input() works.
+    @Test(.enabled(if: canRun), .timeLimit(.minutes(1)))
+    func runInTerminalGivesDebuggeeStdin() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pyide-dbg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let program = dir.appendingPathComponent("ask.py")
+        try "name = input('Name? ')\nprint(f'Hello {name}!')\n".write(to: program, atomically: true, encoding: .utf8)
+
+        let python = try #require(PythonEnvironment.interpreter(for: nil))
+        let inbox = EventInbox()
+        let output = REPLSessionTests.Collector()
+        let debuggee = PipedProcess()
+        debuggee.onOutput = { output.append($0) }
+        let client = DAPClient()
+        client.onEvent = { inbox.add($0, $1) }
+        client.onReverseRequest = { command, arguments in
+            guard command == "runInTerminal" else { return nil }
+            let args = arguments["args"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            try debuggee.start(arguments: args,
+                               environment: PipedProcess.environment(base: ToolLocator.environment(), overrides: arguments["env"]),
+                               currentDirectory: arguments["cwd"]?.stringValue.map { URL(fileURLWithPath: $0) })
+            return ["processId": .int(Int(debuggee.processIdentifier))]
+        }
+        try client.start(executable: python, arguments: ["-m", "debugpy.adapter"],
+                         environment: DebugpyLocator.adapterEnvironment(base: ToolLocator.environment(), useSupportDirectory: true),
+                         currentDirectory: dir)
+        defer {
+            client.terminate()
+            debuggee.terminate()
+        }
+
+        _ = try await client.request("initialize", arguments: [
+            "clientID": "pyide", "adapterID": "debugpy", "linesStartAt1": true, "columnsStartAt1": true,
+            "pathFormat": "path", "supportsRunInTerminalRequest": true,
+        ])
+        let launch = Task {
+            try await client.request("launch", arguments: [
+                "program": .string(program.path), "cwd": .string(dir.path), "python": [.string(python.path)],
+                "console": "integratedTerminal", "justMyCode": true,
+            ])
+        }
+        _ = try await inbox.next("initialized")
+        _ = try await client.request("configurationDone")
+        _ = try await launch.value
+
+        for _ in 0..<200 where !output.value.contains("Name?") { try await Task.sleep(for: .milliseconds(25)) }
+        debuggee.send("Ada\n")
+        _ = try await inbox.next("terminated")
+        for _ in 0..<40 where !output.value.contains("Hello Ada!") { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(output.value.contains("Name? ") && output.value.contains("Hello Ada!"), "output: \(output.value)")
+    }
 }

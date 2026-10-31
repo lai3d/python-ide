@@ -4,6 +4,8 @@ import Foundation
 public final class DAPClient: @unchecked Sendable {
     public typealias EventHandler = @Sendable (_ event: String, _ body: JSONValue) -> Void
     public typealias ExitHandler = @Sendable (_ status: Int32) -> Void
+    /// Answers a reverse request (e.g. `runInTerminal`): return the response body, or nil to decline.
+    public typealias ReverseRequestHandler = @Sendable (_ command: String, _ arguments: JSONValue) throws -> JSONValue?
 
     public enum ClientError: Error, LocalizedError {
         case notRunning
@@ -25,6 +27,7 @@ public final class DAPClient: @unchecked Sendable {
     private var pending: [Int: (command: String, continuation: CheckedContinuation<JSONValue, any Error>)] = [:]
     private var _onEvent: EventHandler?
     private var _onExit: ExitHandler?
+    private var _onReverseRequest: ReverseRequestHandler?
     private var stderrText = ""
 
     public init() {}
@@ -38,6 +41,11 @@ public final class DAPClient: @unchecked Sendable {
     public var onExit: ExitHandler? {
         get { lock.withLock { _onExit } }
         set { lock.withLock { _onExit = newValue } }
+    }
+
+    public var onReverseRequest: ReverseRequestHandler? {
+        get { lock.withLock { _onReverseRequest } }
+        set { lock.withLock { _onReverseRequest = newValue } }
     }
 
     /// Adapter stderr so far (useful when it fails to start).
@@ -147,10 +155,23 @@ public final class DAPClient: @unchecked Sendable {
             guard let event = message["event"]?.stringValue else { return }
             onEvent?(event, message["body"] ?? .null)
         case "request":
-            // Reverse requests (e.g. runInTerminal): we advertise no support, so decline.
+            // Reverse requests (e.g. runInTerminal).
             guard let seq = message["seq"]?.intValue, let command = message["command"]?.stringValue else { return }
-            try? send(["seq": 0, "type": "response", "request_seq": .int(seq), "command": .string(command),
-                       "success": false, "message": "not supported"])
+            var response: [String: JSONValue] = ["seq": 0, "type": "response", "request_seq": .int(seq),
+                                                 "command": .string(command)]
+            do {
+                if let body = try onReverseRequest?(command, message["arguments"] ?? .null) {
+                    response["success"] = true
+                    response["body"] = body
+                } else {
+                    response["success"] = false
+                    response["message"] = "not supported"
+                }
+            } catch {
+                response["success"] = false
+                response["message"] = .string(error.localizedDescription)
+            }
+            try? send(.object(response))
         default:
             break
         }

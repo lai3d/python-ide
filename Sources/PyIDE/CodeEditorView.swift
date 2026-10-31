@@ -12,6 +12,8 @@ struct EditorServices {
     var rename: @MainActor (Int) -> Void
     /// Zero-based line clicked in the gutter.
     var toggleBreakpoint: @MainActor (Int) -> Void
+    var editBreakpointCondition: @MainActor (Int) -> Void = { _ in }
+    var removeBreakpoint: @MainActor (Int) -> Void = { _ in }
     var caretMoved: @MainActor (NSRange) -> Void
 }
 
@@ -27,6 +29,7 @@ struct CodeEditorView: NSViewRepresentable {
     var isEditable: Bool
     var diagnostics: [Diagnostic]
     var breakpointLines: Set<Int> = []
+    var conditionalBreakpointLines: Set<Int> = []
     /// Zero-based line where the debugger is paused in this document.
     var executionLine: Int?
     var reveal: RevealTarget?
@@ -93,6 +96,8 @@ struct CodeEditorView: NSViewRepresentable {
         scrollView.rulersVisible = true
 
         ruler.onToggleBreakpoint = { [weak coordinator] line in coordinator?.parent.services.toggleBreakpoint(line) }
+        ruler.onEditCondition = { [weak coordinator] line in coordinator?.parent.services.editBreakpointCondition(line) }
+        ruler.onRemoveBreakpoint = { [weak coordinator] line in coordinator?.parent.services.removeBreakpoint(line) }
         coordinator.textView = textView
         coordinator.ruler = ruler
         coordinator.documentID = documentID
@@ -120,7 +125,8 @@ struct CodeEditorView: NSViewRepresentable {
             coordinator.applyStyling()
         }
 
-        coordinator.ruler?.setDebugState(breakpoints: breakpointLines, executionLine: executionLine)
+        coordinator.ruler?.setDebugState(breakpoints: breakpointLines, conditional: conditionalBreakpointLines,
+                                         executionLine: executionLine)
 
         if let reveal, reveal.id != coordinator.lastRevealID {
             coordinator.lastRevealID = reveal.id

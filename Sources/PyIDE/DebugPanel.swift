@@ -192,15 +192,20 @@ struct DebugConsole: View {
             }
             Divider()
             HStack(spacing: 6) {
-                Text(">>>").font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
-                TextField(session.isStopped ? "Evaluate in the selected frame" : "Evaluate (pause first for locals)", text: $input)
+                Text(session.isStopped ? ">>>" : "›").font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
+                TextField(session.isStopped ? "Evaluate in the selected frame" : "Input for the program (stdin)", text: $input)
                     .textFieldStyle(.plain)
                     .font(.system(.callout, design: .monospaced))
                     .onSubmit {
-                        session.evaluate(input)
+                        session.submitConsoleInput(input)
                         input = ""
                     }
                     .disabled(!session.isActive)
+                if session.isActive && !session.isStopped {
+                    Button("EOF") { session.sendEOF() }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Close the program's stdin (Ctrl-D)")
+                }
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)

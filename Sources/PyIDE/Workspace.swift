@@ -82,8 +82,8 @@ final class Workspace {
     /// Current editor selection (UTF-16), reported by the editor.
     @ObservationIgnored var selectedRange = NSRange(location: 0, length: 0)
 
-    /// Breakpoints per normalized path, as zero-based line numbers.
-    private(set) var breakpoints: [String: Set<Int>] = [:]
+    /// Breakpoints per normalized path: zero-based line → condition ("" when unconditional).
+    private(set) var breakpoints: [String: [Int: String]] = [:]
     private(set) var debugSession: DebugSession?
     private(set) var executionLocation: ExecutionLocation?
 
@@ -282,6 +282,12 @@ final class Workspace {
 
     private func setText(_ newText: String, at index: Int) {
         guard documents[index].text != newText else { return }
+        // Keep breakpoints on their code as lines are inserted or deleted.
+        let key = documents[index].id
+        if let lines = breakpoints[key], !lines.isEmpty {
+            let moved = LineShift.remap(lines, old: documents[index].text, new: newText)
+            if moved != lines { updateBreakpoints(moved, for: key) }
+        }
         documents[index].text = newText
         documents[index].isDirty = true
         documents[index].version += 1
@@ -832,7 +838,45 @@ final class Workspace {
 
     var isDebugging: Bool { debugSession?.isActive ?? false }
 
-    var currentBreakpoints: Set<Int> { breakpoints[currentDocumentID] ?? [] }
+    var currentBreakpoints: Set<Int> { Set((breakpoints[currentDocumentID] ?? [:]).keys) }
+
+    var currentConditionalBreakpoints: Set<Int> {
+        Set((breakpoints[currentDocumentID] ?? [:]).filter { !$0.value.isEmpty }.keys)
+    }
+
+    private static func sourceBreakpoints(_ lines: [Int: String]) -> [SourceBreakpoint] {
+        lines.map { SourceBreakpoint(line: $0.key + 1, condition: $0.value.isEmpty ? nil : $0.value) }
+    }
+
+    private func updateBreakpoints(_ lines: [Int: String], for key: String) {
+        breakpoints[key] = lines.isEmpty ? nil : lines
+        debugSession?.setBreakpoints(path: key, Self.sourceBreakpoints(lines))
+    }
+
+    /// Asks for a Python expression; the breakpoint only pauses when it is true.
+    func editBreakpointCondition(line: Int) {
+        let key = currentDocumentID
+        let alert = NSAlert()
+        alert.messageText = "Breakpoint condition (line \(line + 1))"
+        alert.informativeText = "Pause only when this Python expression is true. Leave empty to always pause."
+        let field = NSTextField(string: breakpoints[key]?[line] ?? "")
+        field.placeholderString = "e.g. i == 3"
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        var lines = breakpoints[key] ?? [:]
+        lines[line] = field.stringValue.trimmingCharacters(in: .whitespaces)
+        updateBreakpoints(lines, for: key)
+    }
+
+    func removeBreakpoint(line: Int) {
+        var lines = breakpoints[currentDocumentID] ?? [:]
+        lines.removeValue(forKey: line)
+        updateBreakpoints(lines, for: currentDocumentID)
+    }
 
     var currentExecutionLine: Int? {
         guard let executionLocation, executionLocation.key == currentDocumentID else { return nil }
@@ -842,10 +886,9 @@ final class Workspace {
     func toggleBreakpoint(line: Int) {
         guard let currentFile, Self.isPython(currentFile) else { return }
         let key = currentDocumentID
-        var lines = breakpoints[key] ?? []
-        if lines.contains(line) { lines.remove(line) } else { lines.insert(line) }
-        breakpoints[key] = lines.isEmpty ? nil : lines
-        debugSession?.setBreakpoints(path: key, lines: lines.map { $0 + 1 })
+        var lines = breakpoints[key] ?? [:]
+        if lines[line] != nil { lines.removeValue(forKey: line) } else { lines[line] = "" }
+        updateBreakpoints(lines, for: key)
     }
 
     func toggleBreakpointAtCaret() {
@@ -853,7 +896,7 @@ final class Workspace {
     }
 
     func clearAllBreakpoints() {
-        for key in breakpoints.keys { debugSession?.setBreakpoints(path: key, lines: []) }
+        for key in breakpoints.keys { debugSession?.setBreakpoints(path: key, []) }
         breakpoints = [:]
     }
 
@@ -876,7 +919,7 @@ final class Workspace {
         }
 
         let session = DebugSession(
-            breakpoints: Dictionary(uniqueKeysWithValues: breakpoints.map { ($0.key, $0.value.map { $0 + 1 }) }),
+            breakpoints: breakpoints.mapValues(Self.sourceBreakpoints),
             programName: program.lastPathComponent)
         session.onLocation = { [weak self, weak session] location in
             guard let self, self.debugSession === session else { return }

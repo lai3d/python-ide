@@ -116,6 +116,7 @@ struct EditorArea: View {
                         isEditable: !workspace.isReadOnly,
                         diagnostics: workspace.currentDiagnostics,
                         breakpointLines: workspace.currentBreakpoints,
+                        conditionalBreakpointLines: workspace.currentConditionalBreakpoints,
                         executionLine: workspace.currentExecutionLine,
                         reveal: workspace.revealTarget,
                         services: EditorServices(
@@ -126,6 +127,8 @@ struct EditorArea: View {
                             references: { offset in Task { await workspace.findReferences(at: offset) } },
                             rename: { offset in Task { await workspace.renameSymbol(at: offset) } },
                             toggleBreakpoint: { workspace.toggleBreakpoint(line: $0) },
+                            editBreakpointCondition: { workspace.editBreakpointCondition(line: $0) },
+                            removeBreakpoint: { workspace.removeBreakpoint(line: $0) },
                             caretMoved: {
                                 workspace.caretOffset = $0.location
                                 workspace.selectedRange = $0

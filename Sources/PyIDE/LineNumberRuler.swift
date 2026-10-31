@@ -9,6 +9,9 @@ final class LineNumberRuler: NSRulerView {
     /// Worst severity per zero-based line.
     private var lineMarkers: [Int: Diagnostic.Severity] = [:]
     private var breakpointLines: Set<Int> = []
+    private var conditionalLines: Set<Int> = []
+    var onEditCondition: ((Int) -> Void)?
+    var onRemoveBreakpoint: ((Int) -> Void)?
     private var executionLine: Int?
     /// Called with a zero-based line when its number is clicked.
     var onToggleBreakpoint: ((Int) -> Void)?
@@ -49,9 +52,11 @@ final class LineNumberRuler: NSRulerView {
         }
     }
 
-    func setDebugState(breakpoints: Set<Int>, executionLine: Int?) {
-        guard breakpoints != breakpointLines || executionLine != self.executionLine else { return }
+    func setDebugState(breakpoints: Set<Int>, conditional: Set<Int>, executionLine: Int?) {
+        guard breakpoints != breakpointLines || conditional != conditionalLines
+                || executionLine != self.executionLine else { return }
         breakpointLines = breakpoints
+        conditionalLines = conditional
         self.executionLine = executionLine
         needsDisplay = true
     }
@@ -102,7 +107,7 @@ final class LineNumberRuler: NSRulerView {
                 path.line(to: NSPoint(x: rect.minX, y: rect.minY + 3))
                 path.appendArc(withCenter: NSPoint(x: rect.minX + 3, y: rect.minY + 3), radius: 3, startAngle: 180, endAngle: 270)
                 path.close()
-                NSColor.systemBlue.setFill()
+                (conditionalLines.contains(line) ? NSColor.systemPurple : NSColor.systemBlue).setFill()
                 path.fill()
             }
             if line == executionLine {
@@ -164,6 +169,34 @@ final class LineNumberRuler: NSRulerView {
         }
     }
 
+    /// Right-click on a breakpoint: edit its condition or remove it; elsewhere: add one.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let line = lineNumber(for: event) else { return nil }
+        let menu = NSMenu()
+        if breakpointLines.contains(line) {
+            menu.addItem(ClosureMenuItem(conditionalLines.contains(line) ? "Edit Condition…" : "Add Condition…") { [weak self] in
+                self?.onEditCondition?(line)
+            })
+            menu.addItem(ClosureMenuItem("Remove Breakpoint") { [weak self] in self?.onRemoveBreakpoint?(line) })
+        } else {
+            menu.addItem(ClosureMenuItem("Add Breakpoint") { [weak self] in self?.onToggleBreakpoint?(line) })
+            menu.addItem(ClosureMenuItem("Add Conditional Breakpoint…") { [weak self] in self?.onEditCondition?(line) })
+        }
+        return menu
+    }
+
+    private func lineNumber(for event: NSEvent) -> Int? {
+        guard let textView, let layoutManager = textView.layoutManager, let container = textView.textContainer else { return nil }
+        let point = textView.convert(event.locationInWindow, from: nil)
+        let containerPoint = NSPoint(x: 0, y: point.y - textView.textContainerOrigin.y)
+        let extra = layoutManager.extraLineFragmentRect
+        if !extra.isEmpty, containerPoint.y >= extra.minY, (textView.string as NSString).length > 0 {
+            return lineStarts.count - 1
+        }
+        let glyph = layoutManager.glyphIndex(for: containerPoint, in: container)
+        return line(containing: layoutManager.characterIndexForGlyph(at: glyph))
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard let textView, let layoutManager = textView.layoutManager else { return }
         let point = textView.convert(event.locationInWindow, from: nil)
@@ -184,4 +217,19 @@ final class LineNumberRuler: NSRulerView {
             textView.setSelectedRange(lineRange)
         }
     }
+}
+
+/// A menu item that runs a closure.
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(_ title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    @objc private func run() { handler() }
 }
