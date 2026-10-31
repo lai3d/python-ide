@@ -96,7 +96,11 @@ struct PyIDEApp: App {
                 Button("Debug File") { Task { await workspace.startDebugging() } }
                     .keyboardShortcut("d", modifiers: [.shift, .command])
                     .disabled(workspace.rootURL == nil || workspace.isDebugging)
-                Button("Stop Debugging") { workspace.stopDebugging() }
+                Button("Attach to Python…") { Task { await workspace.attachDebugger() } }
+                    .disabled(workspace.isDebugging)
+                Button(workspace.debugSession?.isAttached == true ? "Detach" : "Stop Debugging") {
+                    workspace.stopDebugging()
+                }
                     .disabled(!workspace.isDebugging)
                 Divider()
                 Button("Continue") { workspace.debugSession?.resume() }

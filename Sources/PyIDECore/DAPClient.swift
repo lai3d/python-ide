@@ -1,6 +1,7 @@
 import Foundation
 
-/// A minimal Debug Adapter Protocol client over stdio (same `Content-Length` framing as LSP).
+/// A minimal Debug Adapter Protocol client over stdio (same `Content-Length` framing as LSP),
+/// or over TCP to an adapter that is already listening (`python -m debugpy --listen`).
 public final class DAPClient: @unchecked Sendable {
     public typealias EventHandler = @Sendable (_ event: String, _ body: JSONValue) -> Void
     public typealias ExitHandler = @Sendable (_ status: Int32) -> Void
@@ -22,6 +23,8 @@ public final class DAPClient: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var stdin: FileHandle?
+    /// The TCP connection when connected to a listening adapter instead of running one.
+    private var socket: FileHandle?
     private var framer = LSPFramer()
     private var nextSeq = 1
     private var pending: [Int: (command: String, continuation: CheckedContinuation<JSONValue, any Error>)] = [:]
@@ -87,6 +90,50 @@ public final class DAPClient: @unchecked Sendable {
         }
     }
 
+    /// Connects to an adapter listening on `host:port`. Blocks while connecting, so call it off
+    /// the main thread.
+    public func connect(host: String, port: Int) throws {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var info: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, String(port), &hints, &info)
+        guard status == 0, let first = info else {
+            throw ClientError.failed(command: "connect", message: String(cString: gai_strerror(status)))
+        }
+        defer { freeaddrinfo(first) }
+        var lastError = ECONNREFUSED
+        var candidate: UnsafeMutablePointer<addrinfo>? = first
+        while let address = candidate {
+            candidate = address.pointee.ai_next
+            let fd = Darwin.socket(address.pointee.ai_family, address.pointee.ai_socktype, address.pointee.ai_protocol)
+            guard fd >= 0 else { continue }
+            var on: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            guard Darwin.connect(fd, address.pointee.ai_addr, address.pointee.ai_addrlen) == 0 else {
+                lastError = errno
+                close(fd)
+                continue
+            }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            handle.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                    self?.handleExit(0)
+                    return
+                }
+                self?.receive(data)
+            }
+            lock.withLock {
+                socket = handle
+                stdin = handle
+            }
+            return
+        }
+        throw ClientError.failed(command: "connect to \(host):\(port)", message: String(cString: strerror(lastError)))
+    }
+
     /// Sends a request and waits for its response body. Throws if `success` is false.
     public func request(_ command: String, arguments: JSONValue = .null) async throws -> JSONValue {
         try await withCheckedThrowingContinuation { continuation in
@@ -114,8 +161,13 @@ public final class DAPClient: @unchecked Sendable {
     }
 
     public func terminate() {
-        let p = lock.withLock { process }
+        let (p, socket) = lock.withLock { (process, self.socket) }
         if let p, p.isRunning { p.terminate() }
+        if let socket {
+            socket.readabilityHandler = nil
+            shutdown(socket.fileDescriptor, SHUT_RDWR)
+            handleExit(0)
+        }
     }
 
     // MARK: - Private
@@ -183,6 +235,7 @@ public final class DAPClient: @unchecked Sendable {
             pending.removeAll()
             stdin = nil
             process = nil
+            socket = nil
             return (waiters, _onExit)
         }
         for waiter in waiters { waiter.resume(throwing: ClientError.notRunning) }
@@ -211,6 +264,84 @@ public struct StackFrameInfo: Sendable, Hashable, Identifiable {
             guard let id = frame["id"]?.intValue, let name = frame["name"]?.stringValue else { return nil }
             return StackFrameInfo(id: id, name: name, path: frame["source"]?["path"]?.stringValue,
                                   line: frame["line"]?.intValue ?? 0)
+        }
+    }
+}
+
+public struct ThreadInfo: Sendable, Hashable, Identifiable {
+    public let id: Int
+    public let name: String
+
+    public init(id: Int, name: String) {
+        self.id = id
+        self.name = name
+    }
+
+    /// Parses a `threads` response body.
+    public static func parseAll(_ body: JSONValue) -> [ThreadInfo] {
+        (body["threads"]?.arrayValue ?? []).compactMap { thread in
+            guard let id = thread["id"]?.intValue else { return nil }
+            return ThreadInfo(id: id, name: thread["name"]?.stringValue ?? "Thread \(id)")
+        }
+    }
+}
+
+/// What a debug session runs or attaches to.
+public enum DebugTarget: Sendable, Hashable {
+    /// Start `program` under the debugger.
+    case launch(program: URL, cwd: URL)
+    /// Connect to a program already listening (`python -m debugpy --listen host:port …`).
+    case connect(host: String, port: Int)
+    /// Inject debugpy into a running Python process (needs lldb and permission to attach).
+    case process(id: Int32)
+
+    public var isAttach: Bool {
+        if case .launch = self { false } else { true }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .launch(let program, _): program.lastPathComponent
+        case .connect(let host, let port): "\(host):\(port)"
+        case .process(let id): "process \(id)"
+        }
+    }
+
+    /// Parses an attach address: `5678`, `:5678`, `host:5678` connect; `pid 123` or `pid:123` attach to a process.
+    public static func parseAttach(_ text: String) -> DebugTarget? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("pid") {
+            let digits = lower.dropFirst(3).drop { $0 == " " || $0 == ":" || $0 == "=" }
+            return Int32(digits).flatMap { $0 > 0 ? .process(id: $0) : nil }
+        }
+        let host: Substring
+        let portText: Substring
+        if let colon = trimmed.lastIndex(of: ":") {
+            host = trimmed[..<colon]
+            portText = trimmed[trimmed.index(after: colon)...]
+        } else {
+            host = ""
+            portText = Substring(trimmed)
+        }
+        guard let port = Int(portText), (1...65535).contains(port), !host.contains(" ") else { return nil }
+        return .connect(host: host.isEmpty ? "127.0.0.1" : String(host), port: port)
+    }
+
+    /// DAP `launch` / `attach` arguments for debugpy (launch also needs the interpreter path).
+    public func requestArguments(python: URL) -> (command: String, arguments: JSONValue) {
+        switch self {
+        case .launch(let program, let cwd):
+            return ("launch", [
+                "program": .string(program.path), "cwd": .string(cwd.path), "python": [.string(python.path)],
+                // integratedTerminal: debugpy asks us (runInTerminal) to start the program, giving us its stdin.
+                "console": "integratedTerminal", "justMyCode": true,
+                "env": ["PYTHONUNBUFFERED": "1"],
+            ])
+        case .connect(let host, let port):
+            return ("attach", ["connect": ["host": .string(host), "port": .int(port)], "justMyCode": true])
+        case .process(let id):
+            return ("attach", ["processId": .int(Int(id)), "justMyCode": true])
         }
     }
 }

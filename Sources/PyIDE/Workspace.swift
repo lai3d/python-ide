@@ -1197,13 +1197,48 @@ final class Workspace {
     /// Debugs the current file (or the project's entry point) under debugpy.
     func startDebugging() async {
         guard rootURL != nil, !isDebugging else { return }
-        guard let python = interpreter else {
-            flashStatus("Python not found — choose an interpreter")
-            return
-        }
         saveAllNow()
         guard let program = runTarget(), let cwd = rootURL else {
             flashStatus("Nothing to debug: open a .py file (or add main.py)")
+            return
+        }
+        await beginDebugSession(.launch(program: program, cwd: cwd))
+    }
+
+    /// The last address used with Attach, offered again next time.
+    @ObservationIgnored private var lastAttachAddress = "127.0.0.1:5678"
+
+    /// Asks for a debugpy address (or a process ID) and attaches to it.
+    func attachDebugger() async {
+        guard !isDebugging else { return }
+        let alert = NSAlert()
+        alert.messageText = "Attach to Python"
+        alert.informativeText = """
+            Address of a program started with
+              python -m debugpy --listen 5678 [--wait-for-client] app.py
+            as host:port or just the port. Or “pid 1234” to inject into a running process \
+            (needs lldb and permission to debug it).
+            """
+        let field = NSTextField(string: lastAttachAddress)
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        field.placeholderString = "127.0.0.1:5678 or pid 1234"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Attach")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let target = DebugTarget.parseAttach(field.stringValue) else {
+            flashStatus("Not an address: use host:port, a port, or pid <number>")
+            return
+        }
+        lastAttachAddress = field.stringValue
+        await beginDebugSession(target)
+    }
+
+    func beginDebugSession(_ target: DebugTarget) async {
+        guard !isDebugging else { return }
+        guard let python = interpreter else {
+            flashStatus("Python not found — choose an interpreter")
             return
         }
         let environment = ToolLocator.environment(interpreter: python)
@@ -1212,9 +1247,7 @@ final class Workspace {
             guard await installDebugpy(python: python) else { return }
         }
 
-        let session = DebugSession(
-            breakpoints: breakpoints.mapValues(Self.sourceBreakpoints),
-            programName: program.lastPathComponent)
+        let session = DebugSession(breakpoints: breakpoints.mapValues(Self.sourceBreakpoints), target: target)
         session.onLocation = { [weak self, weak session] location in
             guard let self, self.debugSession === session else { return }
             guard let (path, line) = location else {
@@ -1233,8 +1266,16 @@ final class Workspace {
         session.setWatches(watchExpressions)
         debugSession = session
         bottomTab = .debug
-        session.start(python: python, program: program, cwd: cwd, environment: environment,
-                      useSupportDirectory: !hasOwnDebugpy)
+        session.start(python: python, cwd: rootURL, environment: environment, useSupportDirectory: !hasOwnDebugpy)
+    }
+
+    /// Debugs again what the last session debugged (re-attaches for attach sessions).
+    func restartDebugging() async {
+        if let target = debugSession?.target, target.isAttach {
+            await beginDebugSession(target)
+        } else {
+            await startDebugging()
+        }
     }
 
     func stopDebugging() {

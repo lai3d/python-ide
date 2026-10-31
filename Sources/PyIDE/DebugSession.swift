@@ -13,6 +13,11 @@ final class DebugSession {
     private(set) var state: State = .starting
     private(set) var stopDescription = ""
     private(set) var frames: [StackFrameInfo] = []
+    /// The program's threads (refreshed on every stop) and the one whose stack is shown.
+    private(set) var threads: [ThreadInfo] = []
+    private(set) var selectedThreadID: Int?
+    /// The thread that hit the breakpoint / raised (others are paused alongside it).
+    private(set) var stoppedThreadID: Int?
     private(set) var selectedFrameID: Int?
     private(set) var scopes: [VariableInfo] = []
     /// Bumped on every stop so variable trees (whose references are only valid per stop) rebuild.
@@ -23,7 +28,6 @@ final class DebugSession {
     private(set) var watchExpressions: [String] = []
 
     @ObservationIgnored private let client = DAPClient()
-    @ObservationIgnored private var threadID: Int?
     @ObservationIgnored private var breakpoints: [String: [SourceBreakpoint]]
     /// The program itself, started by us at the adapter's request so its stdin is ours.
     @ObservationIgnored private var debuggee: PipedProcess?
@@ -33,11 +37,14 @@ final class DebugSession {
     @ObservationIgnored var onLocation: ((String, Int)?) -> Void = { _ in }
     @ObservationIgnored var onEnd: () -> Void = {}
 
-    let programName: String
+    let target: DebugTarget
+    var programName: String { target.displayName }
+    /// Attached sessions disconnect instead of killing the program.
+    var isAttached: Bool { target.isAttach }
 
-    init(breakpoints: [String: [SourceBreakpoint]], programName: String) {
+    init(breakpoints: [String: [SourceBreakpoint]], target: DebugTarget) {
         self.breakpoints = breakpoints
-        self.programName = programName
+        self.target = target
     }
 
     var isStopped: Bool { state == .stopped }
@@ -45,7 +52,7 @@ final class DebugSession {
 
     // MARK: Lifecycle
 
-    func start(python: URL, program: URL, cwd: URL, environment: [String: String], useSupportDirectory: Bool) {
+    func start(python: URL, cwd: URL?, environment: [String: String], useSupportDirectory: Bool) {
         client.onEvent = { [weak self] event, body in
             Task { @MainActor in self?.handle(event: event, body: body) }
         }
@@ -71,32 +78,52 @@ final class DebugSession {
                 self.end()
             }
         }
-        do {
-            try client.start(executable: python, arguments: ["-m", "debugpy.adapter"],
-                             environment: DebugpyLocator.adapterEnvironment(base: environment, useSupportDirectory: useSupportDirectory),
-                             currentDirectory: cwd)
-        } catch {
-            log("Failed to start debugpy: \(error.localizedDescription)\n")
-            end()
-            return
+        if case .connect = target {
+            // `debugpy --listen` runs its own adapter: talk to it directly.
+        } else {
+            do {
+                try client.start(executable: python, arguments: ["-m", "debugpy.adapter"],
+                                 environment: DebugpyLocator.adapterEnvironment(base: environment, useSupportDirectory: useSupportDirectory),
+                                 currentDirectory: cwd)
+            } catch {
+                log("Failed to start debugpy: \(error.localizedDescription)\n")
+                end()
+                return
+            }
+        }
+        if case .process(let id) = target {
+            log("Injecting debugpy into process \(id) with lldb… macOS may ask for permission to debug it.\n")
+            // If lldb can't attach (no permission, hardened interpreter) the adapter never answers.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(30))
+                guard let self, self.state == .starting else { return }
+                self.log("Gave up: could not attach to process \(id) within 30 s. Starting the program with "
+                         + "`python -m debugpy --listen 5678 …` and attaching to the port is more reliable.\n")
+                self.stop()
+            }
         }
         launchTask = Task {
             do {
+                if case .connect(let host, let port) = target {
+                    log("Connecting to \(host):\(port)…\n")
+                    let client = self.client
+                    try await Task.detached { try client.connect(host: host, port: port) }.value
+                }
                 _ = try await client.request("initialize", arguments: [
                     "clientID": "pyide", "clientName": "PyIDE", "adapterID": "debugpy",
                     "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
                     "supportsRunInTerminalRequest": true, "supportsVariableType": true,
                 ])
-                // debugpy replies to `launch` after configurationDone (sent on the `initialized` event).
-                _ = try await client.request("launch", arguments: [
-                    "program": .string(program.path), "cwd": .string(cwd.path), "python": [.string(python.path)],
-                    // integratedTerminal: debugpy asks us (runInTerminal) to start the program, giving us its stdin.
-                    "console": "integratedTerminal", "justMyCode": true,
-                    "env": ["PYTHONUNBUFFERED": "1"],
-                ])
+                // debugpy replies to `launch`/`attach` after configurationDone (sent on `initialized`).
+                let (command, arguments) = target.requestArguments(python: python)
+                _ = try await client.request(command, arguments: arguments)
                 if state == .starting { state = .running }
+                if isAttached { log("Attached to \(programName)\n") }
             } catch {
-                log("Launch failed: \(error.localizedDescription)\n")
+                log("\(isAttached ? "Attach" : "Launch") failed: \(error.localizedDescription)\n")
+                if case .connect = target {
+                    log("Is the program running with `python -m debugpy --listen \(programName) …`?\n")
+                }
                 stop()
             }
         }
@@ -104,9 +131,11 @@ final class DebugSession {
 
     func stop() {
         guard state != .ended else { return }
+        // Don't wait for the reply: an adapter stuck attaching never sends one.
+        client.send("disconnect", arguments: ["terminateDebuggee": .bool(!isAttached)])
+        let client = self.client
         Task {
-            _ = try? await client.request("disconnect", arguments: ["terminateDebuggee": true])
-            try? await Task.sleep(for: .milliseconds(300))
+            try? await Task.sleep(for: .milliseconds(800))
             client.terminate()
         }
         end()
@@ -118,9 +147,10 @@ final class DebugSession {
         debuggee?.terminate()
         debuggee = nil
         frames = []
+        threads = []
         scopes = []
         onLocation(nil)
-        log("\n[debug session ended]\n")
+        log(isAttached ? "\n[detached from \(programName)]\n" : "\n[debug session ended]\n")
         onEnd()
     }
 
@@ -153,11 +183,12 @@ final class DebugSession {
 
     func pause() {
         guard state == .running else { return }
-        client.send("pause", arguments: ["threadId": .int(threadID ?? 1)])
+        // debugpy pauses every thread whichever one is named.
+        client.send("pause", arguments: ["threadId": .int(selectedThreadID ?? threads.first?.id ?? 1)])
     }
 
     private func control(_ command: String) {
-        guard state == .stopped, let threadID else { return }
+        guard state == .stopped, let threadID = selectedThreadID ?? stoppedThreadID else { return }
         state = .running
         watchValues = [:]
         frames = []
@@ -268,11 +299,18 @@ final class DebugSession {
         case "initialized":
             Task { await sendConfiguration() }
         case "stopped":
-            threadID = body["threadId"]?.intValue ?? threadID
+            let thread = body["threadId"]?.intValue ?? stoppedThreadID
+            stoppedThreadID = thread
+            selectedThreadID = thread
             state = .stopped
             let reason = body["reason"]?.stringValue ?? "pause"
             stopDescription = body["description"]?.stringValue ?? "Paused on \(reason)"
-            Task { await loadStack(reason: reason) }
+            Task {
+                await loadThreads()
+                await loadStack(reason: reason)
+            }
+        case "thread":
+            if state == .stopped { Task { await loadThreads() } }
         case "continued":
             if state == .stopped {
                 state = .running
@@ -292,10 +330,28 @@ final class DebugSession {
         }
     }
 
+    private func loadThreads() async {
+        guard let body = try? await client.request("threads") else { return }
+        threads = ThreadInfo.parseAll(body)
+        if selectedThreadID == nil || !threads.contains(where: { $0.id == selectedThreadID }) {
+            selectedThreadID = stoppedThreadID ?? threads.first?.id
+        }
+    }
+
+    /// Shows another (paused) thread's stack; stepping then applies to it.
+    func select(thread id: Int) {
+        guard state == .stopped, id != selectedThreadID else { return }
+        selectedThreadID = id
+        frames = []
+        scopes = []
+        Task { await loadStack(reason: "") }
+    }
+
     private func loadStack(reason: String) async {
-        guard let threadID,
+        guard let threadID = selectedThreadID,
               let body = try? await client.request("stackTrace", arguments: ["threadId": .int(threadID), "levels": 50])
         else { return }
+        guard selectedThreadID == threadID else { return }
         frames = StackFrameInfo.parseAll(body)
         if reason == "exception",
            let info = try? await client.request("exceptionInfo", arguments: ["threadId": .int(threadID)]) {

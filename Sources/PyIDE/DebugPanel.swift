@@ -24,8 +24,11 @@ struct DebugPanel: View {
                 Text("Not debugging").foregroundStyle(.secondary)
                 Text("Click a line number to set a breakpoint, then Debug (⇧⌘D).")
                     .font(.caption).foregroundStyle(.tertiary)
-                Button("Debug Current File") { Task { await workspace.startDebugging() } }
-                    .disabled(workspace.rootURL == nil)
+                HStack {
+                    Button("Debug Current File") { Task { await workspace.startDebugging() } }
+                        .disabled(workspace.rootURL == nil)
+                    Button("Attach…") { Task { await workspace.attachDebugger() } }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -47,9 +50,15 @@ struct DebugControls: View {
             button("Step Into (F7)", "arrow.down.to.line") { session.stepIn() }.disabled(!session.isStopped)
             button("Step Out (F8)", "arrow.up.to.line") { session.stepOut() }.disabled(!session.isStopped)
             if session.isActive {
-                button("Stop (⌘.)", "stop.fill") { workspace.stopDebugging() }
+                if session.isAttached {
+                    button("Detach (the program keeps running)", "eject.fill") { workspace.stopDebugging() }
+                } else {
+                    button("Stop (⌘.)", "stop.fill") { workspace.stopDebugging() }
+                }
             } else {
-                button("Debug Again (⇧⌘D)", "arrow.clockwise") { Task { await workspace.startDebugging() } }
+                button(session.isAttached ? "Attach Again" : "Debug Again (⇧⌘D)", "arrow.clockwise") {
+                    Task { await workspace.restartDebugging() }
+                }
             }
             Spacer()
         }
@@ -75,6 +84,21 @@ struct CallStackList: View {
                 .lineLimit(2)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
+            if session.isStopped, session.threads.count > 1 {
+                Picker("Thread", selection: Binding(
+                    get: { session.selectedThreadID ?? -1 },
+                    set: { session.select(thread: $0) })
+                ) {
+                    ForEach(session.threads) { thread in
+                        Text(thread.id == session.stoppedThreadID ? "\(thread.name) ●" : thread.name).tag(thread.id)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+                .help("Threads (● stopped here); all threads are paused")
+            }
             List(session.frames, selection: Binding(
                 get: { session.selectedFrameID },
                 set: { id in if let frame = session.frames.first(where: { $0.id == id }) { session.select(frame: frame) } })

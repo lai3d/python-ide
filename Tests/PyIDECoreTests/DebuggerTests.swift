@@ -27,6 +27,30 @@ import Testing
     }
 }
 
+@Suite struct DebugTargetTests {
+    @Test func parsesAttachAddresses() {
+        #expect(DebugTarget.parseAttach("5678") == .connect(host: "127.0.0.1", port: 5678))
+        #expect(DebugTarget.parseAttach(" :5678 ") == .connect(host: "127.0.0.1", port: 5678))
+        #expect(DebugTarget.parseAttach("devbox.local:9000") == .connect(host: "devbox.local", port: 9000))
+        #expect(DebugTarget.parseAttach("pid 4242") == .process(id: 4242))
+        #expect(DebugTarget.parseAttach("PID:17") == .process(id: 17))
+        #expect(DebugTarget.parseAttach("host:99999") == nil)
+        #expect(DebugTarget.parseAttach("pid abc") == nil)
+        #expect(DebugTarget.parseAttach("") == nil)
+    }
+
+    @Test func buildsRequests() {
+        let python = URL(fileURLWithPath: "/usr/bin/python3")
+        let attach = DebugTarget.connect(host: "h", port: 1).requestArguments(python: python)
+        #expect(attach.command == "attach" && attach.arguments["connect"]?["port"] == 1)
+        let launch = DebugTarget.launch(program: URL(fileURLWithPath: "/p/a.py"), cwd: URL(fileURLWithPath: "/p"))
+        #expect(launch.requestArguments(python: python).command == "launch")
+        #expect(!launch.isAttach && DebugTarget.process(id: 3).isAttach)
+        #expect(ThreadInfo.parseAll(["threads": [["id": 1, "name": "MainThread"], ["id": 7]]]).map(\.name)
+                == ["MainThread", "Thread 7"])
+    }
+}
+
 /// Collects DAP events so the test can await specific ones.
 final class EventInbox: @unchecked Sendable {
     private let lock = NSLock()
