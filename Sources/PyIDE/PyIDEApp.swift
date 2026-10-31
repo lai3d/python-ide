@@ -7,8 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Writing to a dead language server's stdin must not kill the app.
         signal(SIGPIPE, SIG_IGN)
         // Only for a bare SwiftPM executable (`swift run`, no .app bundle): make it a regular app
-        // and bring it forward. A bundled app gets both from LaunchServices, and calling these
-        // there can keep SwiftUI from opening the first window when linked against newer SDKs.
+        // and bring it forward. A bundled app gets both from LaunchServices.
         if Bundle.main.bundleIdentifier == nil {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
@@ -29,6 +28,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct PyIDEApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var workspace = Workspace()
+
+    init() {
+        // `PyIDE <folder>`: Workspace reads the folder from CommandLine.arguments itself. Without
+        // this, AppKit also treats the argument as a document to open, and (linked against the
+        // macOS 26 SDK, as release builds are) SwiftUI then never opens the main window.
+        UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO"])
+    }
 
     var body: some Scene {
         WindowGroup("PyIDE") {
