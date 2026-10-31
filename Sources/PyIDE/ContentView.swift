@@ -114,7 +114,10 @@ struct EditorArea: View {
                         services: EditorServices(
                             completions: { await workspace.completions(at: $0) },
                             hover: { await workspace.hover(at: $0) },
+                            signatureHelp: { await workspace.signatureHelp(at: $0) },
                             definition: { offset in Task { await workspace.jumpToDefinition(at: offset) } },
+                            references: { offset in Task { await workspace.findReferences(at: offset) } },
+                            rename: { offset in Task { await workspace.renameSymbol(at: offset) } },
                             caretMoved: { workspace.caretOffset = $0 }),
                         onChange: { workspace.updateText($0) })
                 } else {
@@ -245,6 +248,9 @@ struct BottomPanel: View {
                 Picker("Panel", selection: $workspace.bottomTab) {
                     Text("Problems (\(workspace.allProblems.count))").tag(BottomTab.problems)
                     Text("Output").tag(BottomTab.output)
+                    if !workspace.references.isEmpty || workspace.bottomTab == .references {
+                        Text("References (\(workspace.references.count))").tag(BottomTab.references)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -272,6 +278,7 @@ struct BottomPanel: View {
             switch workspace.bottomTab {
             case .problems: ProblemsList()
             case .output: OutputView()
+            case .references: ReferencesList()
             }
         }
     }
@@ -305,6 +312,48 @@ struct ProblemsList: View {
             }
             .listStyle(.plain)
         }
+    }
+}
+
+struct ReferencesList: View {
+    @Environment(Workspace.self) private var workspace
+
+    var body: some View {
+        if workspace.references.isEmpty {
+            Text("No references. Right-click a symbol → Find References (⌥⌘R).")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(workspace.references) { item in
+                Button { workspace.openReference(item) } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("\(item.fileName):\(item.position.line + 1)")
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Text(Self.highlight(item.lineText, word: workspace.referencesQuery))
+                            .font(.system(.body, design: .monospaced))
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(workspace.relativePath(item.url))
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    private static func highlight(_ line: String, word: String) -> AttributedString {
+        var text = AttributedString(line)
+        guard !word.isEmpty else { return text }
+        var searchStart = text.startIndex
+        while let range = text[searchStart...].range(of: word) {
+            text[range].font = .system(.body, design: .monospaced).bold()
+            text[range].backgroundColor = Color.yellow.opacity(0.3)
+            searchStart = range.upperBound
+        }
+        return text
     }
 }
 

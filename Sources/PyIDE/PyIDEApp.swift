@@ -55,6 +55,17 @@ struct PyIDEApp: App {
                 }
                 .keyboardShortcut("j", modifiers: [.control, .command])
                 .disabled(!workspace.isPythonFile)
+                Button("Find References") {
+                    Task { await workspace.findReferences(at: workspace.caretOffset) }
+                }
+                .keyboardShortcut("r", modifiers: [.option, .command])
+                .disabled(!workspace.isPythonFile)
+                Button("Rename Symbol…") {
+                    Task { await workspace.renameSymbol(at: workspace.caretOffset) }
+                }
+                .keyboardShortcut("e", modifiers: [.control, .command])
+                .disabled(!workspace.isPythonFile || workspace.isReadOnly)
+                Divider()
                 Button("Go Back") { workspace.goBack() }
                     .keyboardShortcut(.leftArrow, modifiers: [.control, .command])
                     .disabled(!workspace.canGoBack)

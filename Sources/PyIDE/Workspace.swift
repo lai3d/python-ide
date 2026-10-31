@@ -3,7 +3,16 @@ import PyIDECore
 import Observation
 
 enum BottomTab: Hashable {
-    case problems, output
+    case problems, output, references
+}
+
+/// One result of Find References, with its source line for context.
+struct ReferenceItem: Identifiable {
+    let id = UUID()
+    let url: URL
+    let position: TextPosition
+    let lineText: String
+    var fileName: String { url.lastPathComponent }
 }
 
 /// A request for the editor to move the caret to a position.
@@ -60,6 +69,8 @@ final class Workspace {
     }
     var revealTarget: RevealTarget?
     private(set) var backStack: [NavigationPoint] = []
+    private(set) var references: [ReferenceItem] = []
+    private(set) var referencesQuery = ""
     /// UTF-16 caret offset in the current file, reported by the editor.
     @ObservationIgnored var caretOffset = 0
 
@@ -396,6 +407,118 @@ final class Workspace {
         navigate(to: URL(fileURLWithPath: target.path), position: location.start)
     }
 
+    func signatureHelp(at offset: Int) async -> SignatureInfo? {
+        guard case let (lsp, params)? = positionRequest(at: offset),
+              let result = try? await lsp.request("textDocument/signatureHelp", params: params)
+        else { return nil }
+        return SignatureInfo.parse(result)
+    }
+
+    /// Fills the References panel with every use of the symbol at `offset`.
+    func findReferences(at offset: Int) async {
+        guard case let (lsp, params)? = positionRequest(at: offset), case .object(var request) = params else { return }
+        let ns = text as NSString
+        referencesQuery = Identifier.wordRange(in: ns, at: offset).map(ns.substring(with:))
+            ?? Identifier.wordRange(in: ns, at: offset - 1).map(ns.substring(with:)) ?? "symbol"
+        request["context"] = ["includeDeclaration": true]
+        let result = try? await lsp.request("textDocument/references", params: .object(request))
+        let locations = result.map(Location.parseAll) ?? []
+        var cache: [String: [Substring]] = [:]
+        references = locations.compactMap { location -> ReferenceItem? in
+            guard let uri = URL(string: location.uri), uri.isFileURL else { return nil }
+            let url = URL(fileURLWithPath: uri.path)
+            let key = Self.key(for: url)
+            if cache[key] == nil {
+                let source = documents.first { $0.id == key }?.text ?? (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                cache[key] = source.split(separator: "\n", omittingEmptySubsequences: false)
+            }
+            let lines = cache[key] ?? []
+            let line = lines.indices.contains(location.start.line) ? lines[location.start.line] : ""
+            return ReferenceItem(url: url, position: location.start,
+                                 lineText: line.trimmingCharacters(in: .whitespaces))
+        }
+        .sorted { (Self.key(for: $0.url), $0.position.line, $0.position.character)
+                < (Self.key(for: $1.url), $1.position.line, $1.position.character) }
+        bottomTab = .references
+        if references.isEmpty { flashStatus("No references found") }
+    }
+
+    func openReference(_ item: ReferenceItem) {
+        if let url = currentFile {
+            backStack.append(NavigationPoint(url: url, position: LineIndex(text).position(of: caretOffset)))
+            if backStack.count > 100 { backStack.removeFirst() }
+        }
+        navigate(to: item.url, position: item.position)
+    }
+
+    /// Prompts for a new name and applies the language server's rename across files.
+    /// Changed files that aren't open are opened as unsaved tabs, so nothing is written without ⌘S.
+    func renameSymbol(at offset: Int) async {
+        guard case let (lsp, params)? = positionRequest(at: offset), case .object(var request) = params else { return }
+        let ns = text as NSString
+        var oldName = Identifier.wordRange(in: ns, at: offset).map(ns.substring(with:))
+            ?? Identifier.wordRange(in: ns, at: offset - 1).map(ns.substring(with:))
+        if let prepared = try? await lsp.request("textDocument/prepareRename", params: params) {
+            guard let range = PrepareRename.parse(prepared) else {
+                flashStatus("Can't rename this symbol")
+                return
+            }
+            oldName = range.placeholder ?? ns.substring(with: LineIndex(text).range(from: range.start, to: range.end))
+        }
+        guard let oldName, !oldName.isEmpty else {
+            flashStatus("Put the caret on a symbol to rename it")
+            return
+        }
+        guard let newName = Self.promptForName(oldName), newName != oldName else { return }
+        request["newName"] = .string(newName)
+        let result: JSONValue
+        do {
+            result = try await lsp.request("textDocument/rename", params: .object(request))
+        } catch {
+            flashStatus("Rename failed: \(error.localizedDescription)")
+            return
+        }
+        let changes = WorkspaceEdit.parse(result)
+        var occurrences = 0, files = 0
+        for (uri, edits) in changes.sorted(by: { $0.key < $1.key }) {
+            guard let parsed = URL(string: uri), parsed.isFileURL else { continue }
+            let url = URL(fileURLWithPath: parsed.path)
+            guard !isReadOnly(url) else { continue }
+            let key = Self.key(for: url)
+            if let index = documents.firstIndex(where: { $0.id == key }) {
+                setText(TextEdit.apply(edits, to: documents[index].text), at: index)
+            } else {
+                guard let original = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                var document = OpenDocument(url: url, text: TextEdit.apply(edits, to: original))
+                document.isDirty = true
+                documents.append(document)
+                sendDidOpen(document)
+            }
+            occurrences += edits.count
+            files += 1
+        }
+        flashStatus(files == 0 ? "Nothing to rename"
+                    : "Renamed \(occurrences) occurrence\(occurrences == 1 ? "" : "s") in \(files) file\(files == 1 ? "" : "s") — ⌥⌘S to save")
+    }
+
+    private static func promptForName(_ oldName: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Rename '\(oldName)'"
+        alert.informativeText = "All references in the project will be updated. Changed files stay unsaved until you save them."
+        let field = NSTextField(string: oldName)
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        while alert.runModal() == .alertFirstButtonReturn {
+            let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+            if Identifier.isValidPythonName(name) { return name }
+            alert.informativeText = "'\(name)' is not a valid Python identifier."
+        }
+        return nil
+    }
+
     func goBack() {
         guard let point = backStack.popLast() else { return }
         navigate(to: point.url, position: point.position)
@@ -527,8 +650,18 @@ final class Workspace {
             ],
             "hover": ["contentFormat": ["markdown", "plaintext"]],
             "definition": ["linkSupport": false],
+            "references": [:],
+            "rename": ["prepareSupport": true],
+            "signatureHelp": [
+                "signatureInformation": [
+                    "documentationFormat": ["markdown", "plaintext"],
+                    "parameterInformation": ["labelOffsetSupport": true],
+                    "activeParameterSupport": true,
+                ],
+            ],
         ]
-        let workspace: JSONValue = ["configuration": true, "workspaceFolders": true]
+        let workspace: JSONValue = ["configuration": true, "workspaceFolders": true,
+                                    "workspaceEdit": ["documentChanges": true]]
         return [
             "processId": .int(Int(ProcessInfo.processInfo.processIdentifier)),
             "clientInfo": ["name": "PyIDE", "version": "0.1.0"],

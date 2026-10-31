@@ -6,7 +6,10 @@ import SwiftUI
 struct EditorServices {
     var completions: @MainActor (Int) async -> [CompletionItem]
     var hover: @MainActor (Int) async -> String?
+    var signatureHelp: @MainActor (Int) async -> SignatureInfo?
     var definition: @MainActor (Int) -> Void
+    var references: @MainActor (Int) -> Void
+    var rename: @MainActor (Int) -> Void
     var caretMoved: @MainActor (Int) -> Void
 }
 
@@ -152,6 +155,10 @@ struct CodeEditorView: NSViewRepresentable {
         private var lastReplacement: String?
         private var isApplyingCompletion = false
 
+        private let signaturePopup = SignaturePopup()
+        private var signatureTask: Task<Void, Never>?
+        private var signatureLineStart: Int?
+
         private var hoverTask: Task<Void, Never>?
         private var hoverWord: NSRange?
         private var hoverPopover: NSPopover?
@@ -244,6 +251,13 @@ struct CodeEditorView: NSViewRepresentable {
             lastReplacement = nil
             guard parent.highlightCode, !isApplyingCompletion else { return }
 
+            // Signature help: open on "(" / ",", keep it current while visible.
+            if typed == "(" || typed == "," {
+                scheduleSignatureHelp(after: .zero)
+            } else if signaturePopup.isVisible {
+                scheduleSignatureHelp(after: .milliseconds(120))
+            }
+
             if let typed, typed.utf16.count == 1, let unit = typed.utf16.first,
                unit == 0x2E || Identifier.isIdentifier(unit) {
                 if unit == 0x2E {  // "." starts a fresh member completion
@@ -266,6 +280,11 @@ struct CodeEditorView: NSViewRepresentable {
             guard let textView else { return }
             parent.services.caretMoved(textView.selectedRange().location)
             ruler?.needsDisplay = true
+            if signaturePopup.isVisible, let start = signatureLineStart {
+                let ns = textView.string as NSString
+                let caret = min(textView.selectedRange().location, ns.length)
+                if ns.lineRange(for: NSRange(location: caret, length: 0)).location != start { hideSignature() }
+            }
         }
 
         // MARK: Keys
@@ -299,6 +318,9 @@ struct CodeEditorView: NSViewRepresentable {
             }
 
             switch selector {
+            case #selector(NSResponder.cancelOperation(_:)) where signaturePopup.isVisible:
+                hideSignature()
+                return true
             case #selector(NSResponder.cancelOperation(_:)), #selector(NSTextView.complete(_:)):
                 // Esc / ⌥Esc: show completions on demand.
                 if parent.highlightCode && textView.isEditable { scheduleCompletion(after: .zero) }
@@ -540,7 +562,66 @@ struct CodeEditorView: NSViewRepresentable {
         func dismissPopups() {
             endHover()
             hideCompletions()
+            hideSignature()
         }
+
+        // MARK: Signature help
+
+        private func scheduleSignatureHelp(after delay: Duration) {
+            signatureTask?.cancel()
+            signatureTask = Task { [weak self] in
+                if delay > .zero { try? await Task.sleep(for: delay) }
+                guard !Task.isCancelled, let self, let textView = self.textView else { return }
+                let caret = textView.selectedRange().location
+                let info = await self.parent.services.signatureHelp(caret)
+                guard !Task.isCancelled, let window = textView.window else { return }
+                guard let info, textView.selectedRange().location == caret else {
+                    self.signaturePopup.hide()
+                    return
+                }
+                let ns = textView.string as NSString
+                let lineStart = ns.lineRange(for: NSRange(location: min(caret, ns.length), length: 0)).location
+                self.signatureLineStart = lineStart
+                // Anchor at the line's first character so the popup doesn't jitter while typing.
+                let caretRect = textView.firstRect(forCharacterRange: NSRange(location: caret, length: 0), actualRange: nil)
+                let lineRect = textView.firstRect(forCharacterRange: NSRange(location: lineStart, length: 0), actualRange: nil)
+                let anchor = NSRect(x: min(lineRect.minX + 40, caretRect.minX), y: caretRect.minY,
+                                    width: 1, height: caretRect.height)
+                self.signaturePopup.show(info, above: anchor, in: window)
+            }
+        }
+
+        private func hideSignature() {
+            signatureTask?.cancel()
+            signatureTask = nil
+            signatureLineStart = nil
+            signaturePopup.hide()
+        }
+
+        // MARK: Context menu
+
+        func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+            guard parent.highlightCode else { return menu }
+            // Act on the clicked word, not wherever the caret was.
+            let index = (view as? CodeTextView)?.characterIndex(atWindowPoint: event.locationInWindow) ?? charIndex
+            if view.selectedRange().length == 0 { view.setSelectedRange(NSRange(location: index, length: 0)) }
+            let items: [(String, Selector)] = [
+                ("Go to Definition", #selector(menuDefinition(_:))),
+                ("Find References", #selector(menuReferences(_:))),
+            ] + (view.isEditable ? [("Rename Symbol…", #selector(menuRename(_:)))] : [])
+            for (offset, (title, action)) in items.enumerated() {
+                let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+                item.target = self
+                item.tag = index
+                menu.insertItem(item, at: offset)
+            }
+            menu.insertItem(.separator(), at: items.count)
+            return menu
+        }
+
+        @objc private func menuDefinition(_ sender: NSMenuItem) { parent.services.definition(sender.tag) }
+        @objc private func menuReferences(_ sender: NSMenuItem) { parent.services.references(sender.tag) }
+        @objc private func menuRename(_ sender: NSMenuItem) { parent.services.rename(sender.tag) }
 
         @objc func didScroll(_ notification: Notification) {
             dismissPopups()
