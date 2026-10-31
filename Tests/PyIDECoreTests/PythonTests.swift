@@ -32,6 +32,36 @@ import Testing
         #expect(kinds("match = re.match(p, s)").map(\.0) == ["match"])  // only the method call
     }
 
+    @Test func syntaxAwareClassification() {
+        // f-string replacement fields are code, not string.
+        let fstring = kinds(#"msg = f"{len(items)} items""#)
+        #expect(fstring.map(\.0) == [#"f""#, "len", #" items""#])
+        #expect(fstring.map(\.1) == [.string, .builtin, .string])
+        // Annotations name types; a decorator's arguments are code.
+        #expect(kinds("def f(p: Path) -> Config: ...").filter { $0.1 == .type }.map(\.0) == ["Path", "Config"])
+        #expect(kinds(#"@app.route("/")"#).map(\.1) == [.decorator, .string])
+        // Soft keywords by grammar: a match subject spanning lines, `type` aliases vs `type(...)`.
+        #expect(kinds("match (a,\n       b):\n    case _:\n        pass").filter { $0.1 == .keyword }.map(\.0)
+                == ["match", "case", "pass"])
+        #expect(kinds("type Pair = tuple[int, int]").first.map { $0.0 + "/" + "\($0.1)" } == "type/keyword")
+        #expect(kinds("t = type(x)").first?.1 == .type)
+    }
+
+    @Test func largeFileIsFast() {
+        let source = String(repeating: """
+            class Item:
+                def total(self, values: list[int]) -> int:
+                    return sum(v * 2 for v in values if v > 0)  # doubled
+
+            """, count: 2500)  // 10k lines
+        let start = ContinuousClock.now
+        let tokens = PythonHighlighter.tokenize(source)
+        let elapsed = ContinuousClock.now - start
+        #expect(tokens.count >= 40_000)
+        #expect(elapsed < .milliseconds(1500), "took \(elapsed)")
+        print("tokenize 10k lines:", elapsed, "regex:", { let s = ContinuousClock.now; _ = PythonHighlighter.regexTokenize(source); return ContinuousClock.now - s }())
+    }
+
     @Test func numbers() {
         #expect(kinds("a = 0x1F + 1_000 + 3.14e-2 + 2j + .5").filter { $0.1 == .number }.map(\.0)
                 == ["0x1F", "1_000", "3.14e-2", "2j", ".5"])

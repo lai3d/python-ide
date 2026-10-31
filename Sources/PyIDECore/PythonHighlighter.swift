@@ -14,8 +14,8 @@ public struct PyToken: Sendable, Hashable {
     }
 }
 
-/// A fast, regex-based Python lexer for syntax highlighting.
-/// (A tree-sitter grammar can replace this later for incremental parsing.)
+/// Python syntax highlighting: tree-sitter based (see `PythonSyntax`), with a fast regex lexer
+/// as the fallback for code the parser can't handle.
 public enum PythonHighlighter {
     public static let keywords: Set<String> = [
         "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
@@ -57,6 +57,11 @@ public enum PythonHighlighter {
     ].joined(separator: "|"))
 
     public static func tokenize(_ text: String) -> [PyToken] {
+        PythonSyntax.tokenize(text) ?? regexTokenize(text)
+    }
+
+    /// The regex lexer: classifies by the surrounding text only.
+    public static func regexTokenize(_ text: String) -> [PyToken] {
         let ns = text as NSString
         var tokens: [PyToken] = []
         var previousWord: String?
