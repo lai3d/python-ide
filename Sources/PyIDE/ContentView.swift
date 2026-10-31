@@ -6,7 +6,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            FileTreeView()
+            Sidebar()
                 .navigationSplitViewColumnWidth(min: 180, ideal: 240)
         } detail: {
             if workspace.rootURL == nil {
@@ -62,6 +62,81 @@ struct WelcomeView: View {
                 .controlSize(.large)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+enum SidebarMode: String {
+    case files, outline
+}
+
+struct Sidebar: View {
+    @AppStorage("sidebarMode") private var mode: SidebarMode = .files
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Sidebar", selection: $mode) {
+                Image(systemName: "folder").help("Files").tag(SidebarMode.files)
+                Image(systemName: "list.bullet.indent").help("Outline").tag(SidebarMode.outline)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            switch mode {
+            case .files: FileTreeView()
+            case .outline: OutlineView()
+            }
+        }
+    }
+}
+
+struct OutlineView: View {
+    @Environment(Workspace.self) private var workspace
+    @State private var selection: UUID?
+
+    var body: some View {
+        if workspace.outline.isEmpty {
+            Text(workspace.isPythonFile ? "No symbols" : "Open a Python file")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(workspace.outline, children: \.children, selection: $selection) { symbol in
+                HStack(spacing: 6) {
+                    Image(systemName: Self.style(symbol.kind).symbol)
+                        .foregroundStyle(Self.style(symbol.kind).color)
+                    Text(symbol.name).lineLimit(1)
+                    if let detail = symbol.detail, !detail.isEmpty {
+                        Text(detail).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                    }
+                }
+                .tag(symbol.id)
+            }
+            .listStyle(.sidebar)
+            .onChange(of: selection) { _, id in
+                if let id, let symbol = Self.find(id, in: workspace.outline) { workspace.reveal(symbol) }
+            }
+        }
+    }
+
+    private static func find(_ id: UUID, in symbols: [OutlineSymbol]) -> OutlineSymbol? {
+        for symbol in symbols {
+            if symbol.id == id { return symbol }
+            if let hit = find(id, in: symbol.children ?? []) { return hit }
+        }
+        return nil
+    }
+
+    private static func style(_ kind: OutlineSymbol.Kind) -> (symbol: String, color: Color) {
+        switch kind {
+        case .classType: ("c.square.fill", .green)
+        case .method, .constructor: ("m.square.fill", .purple)
+        case .function: ("f.square.fill", .purple)
+        case .property, .field: ("p.square.fill", .blue)
+        case .variable: ("v.square.fill", .blue)
+        case .constant: ("k.square.fill", .orange)
+        case .module: ("shippingbox.fill", .brown)
+        case .other: ("circle.fill", .gray)
+        }
     }
 }
 

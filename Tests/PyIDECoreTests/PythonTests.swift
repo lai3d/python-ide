@@ -119,7 +119,8 @@ func startPythonServer(in dir: URL) async throws -> LSPClient {
         "processId": .int(Int(getpid())),
         "rootUri": .string(dir.absoluteString),
         "workspaceFolders": [["uri": .string(dir.absoluteString), "name": "t"]],
-        "capabilities": ["textDocument": ["hover": ["contentFormat": ["markdown"]]],
+        "capabilities": ["textDocument": ["hover": ["contentFormat": ["markdown"]],
+                                          "documentSymbol": ["hierarchicalDocumentSymbolSupport": true]],
                          "workspace": ["configuration": true, "workspaceFolders": true]],
     ])
     try client.notify("initialized", params: [:])

@@ -62,7 +62,13 @@ final class Workspace {
     private(set) var rootURL: URL?
     private(set) var fileTree: [FileNode] = []
     private(set) var documents: [OpenDocument] = []
-    private(set) var currentFile: URL?
+    private(set) var currentFile: URL? {
+        didSet { if oldValue != currentFile { scheduleOutlineRefresh(after: .zero) } }
+    }
+    /// Symbols of the current file for the Outline sidebar.
+    private(set) var outline: [OutlineSymbol] = []
+    @ObservationIgnored private var outlineTask: Task<Void, Never>?
+    @ObservationIgnored private var fileWatcher: FileWatcher?
     private(set) var diagnostics: [String: [Diagnostic]] = [:]  // keyed by normalized path
     private(set) var lspStatus = "Language server: not started"
     private(set) var interpreter: URL?
@@ -180,6 +186,9 @@ final class Workspace {
         await stopLanguageServer()
         rootURL = url
         fileTree = FileNode.loadTree(at: url)
+        fileWatcher = FileWatcher(url: url, ignoredComponents: FileNode.ignoredNames.union([".git"])) { [weak self] in
+            self?.reloadTree()
+        }
         interpreter = PythonEnvironment.interpreter(for: url)
         currentFile = nil
         documents = []
@@ -296,6 +305,7 @@ final class Workspace {
             "textDocument": ["uri": .string(documents[index].url.absoluteString), "version": .int(documents[index].version)],
             "contentChanges": [["text": .string(newText)]],
         ])
+        if documents[index].id == currentDocumentID { scheduleOutlineRefresh(after: .milliseconds(500)) }
     }
 
     /// ⌘S: formats first when Format on Save is on.
@@ -327,14 +337,17 @@ final class Workspace {
     }
 
     /// Format Document command.
-    func formatDocument() {
+    func formatDocument() { transformCurrentDocument(.format) }
+
+    /// Fix All / Organize Imports (ruff) on the current document.
+    func transformCurrentDocument(_ operation: CodeFormatter.Operation) {
         guard let index = currentIndex, !isReadOnly(documents[index].url) else { return }
         let id = documents[index].id
-        Task { await format(documentID: id, explicit: true) }
+        Task { await format(documentID: id, operation: operation, explicit: true) }
     }
 
     /// Replaces the document's text with the formatter's output (an undoable edit in the editor).
-    private func format(documentID id: String, explicit: Bool) async {
+    private func format(documentID id: String, operation: CodeFormatter.Operation = .format, explicit: Bool) async {
         guard let index = documents.firstIndex(where: { $0.id == id }) else { return }
         let document = documents[index]
         guard let formatter = CodeFormatter.locate(interpreter: interpreter) else {
@@ -343,13 +356,15 @@ final class Workspace {
         }
         do {
             let formatted = try await formatter.format(
-                document.text, file: document.url,
+                document.text, file: document.url, operation: operation,
                 environment: ToolLocator.environment(interpreter: interpreter), currentDirectory: rootURL)
             // Skip if the user kept typing while the formatter ran.
             guard let index = documents.firstIndex(where: { $0.id == id }), documents[index].text == document.text else { return }
             if formatted.isEmpty && !document.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
             setText(formatted, at: index)
-            if explicit && formatted == document.text { flashStatus("\(formatter.name): already formatted") }
+            if explicit && formatted == document.text {
+                flashStatus(operation == .format ? "\(formatter.name): already formatted" : "\(operation.title): nothing to change")
+            }
         } catch {
             flashStatus(error.localizedDescription)
         }
@@ -434,6 +449,27 @@ final class Workspace {
         backStack.append(NavigationPoint(url: url, position: origin))
         if backStack.count > 100 { backStack.removeFirst() }
         navigate(to: URL(fileURLWithPath: target.path), position: location.start)
+    }
+
+    /// Re-fetches the current file's symbols, debounced while typing.
+    private func scheduleOutlineRefresh(after delay: Duration) {
+        outlineTask?.cancel()
+        outlineTask = Task { [weak self] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            guard !Task.isCancelled, let self else { return }
+            guard self.lspReady, self.isPythonFile, let url = self.currentFile, let lsp = self.lsp else {
+                self.outline = []
+                return
+            }
+            let result = try? await lsp.request("textDocument/documentSymbol",
+                                                params: ["textDocument": ["uri": .string(url.absoluteString)]])
+            guard !Task.isCancelled, self.currentFile == url else { return }
+            self.outline = result.map(OutlineSymbol.parse) ?? []
+        }
+    }
+
+    func reveal(_ symbol: OutlineSymbol) {
+        revealTarget = RevealTarget(position: symbol.position)
     }
 
     func signatureHelp(at offset: Int) async -> SignatureInfo? {
@@ -616,6 +652,7 @@ final class Workspace {
             try client.notify("workspace/didChangeConfiguration", params: ["settings": [:]])
             lspReady = true
             lspStatus = "\(spec.name): ready"
+            scheduleOutlineRefresh(after: .zero)
             documents.forEach(sendDidOpen)
         } catch {
             if lsp === client { lsp = nil }
@@ -679,6 +716,7 @@ final class Workspace {
             ],
             "hover": ["contentFormat": ["markdown", "plaintext"]],
             "definition": ["linkSupport": false],
+            "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
             "references": [:],
             "rename": ["prepareSupport": true],
             "signatureHelp": [

@@ -7,7 +7,7 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
 
 ## Features
 
-- Project sidebar (open any folder; hides `__pycache__`, `.venv`, caches, `*.egg-info`)
+- Project sidebar (open any folder; hides `__pycache__`, `.venv`, caches, `*.egg-info`) that updates live as files are created or deleted, plus an **Outline** mode listing the current file's classes, functions and variables (click to jump)
 - **Tabs** for multiple open files: each keeps its own caret, scroll position and undo history; ⌘W closes (asks to save unsaved changes), ⇧⌘] / ⇧⌘[ switch, ⌥⌘S saves all; right-click for Close Others / Close All / Reveal in Finder
 - **Line-number gutter** with the caret line highlighted and red/yellow dots on lines with errors/warnings; click a number to select the line
 - NSTextView editor with Python syntax highlighting (keywords, soft keywords `match`/`case`, decorators, f/r/b and triple-quoted strings), find bar, undo
@@ -20,6 +20,7 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
   - **signature help** while typing a call: pops up on `(` / `,` with the current parameter highlighted; Esc dismisses
   - **find references** (⌥⌘R or right-click): results in a References panel, click to jump
   - **rename symbol** (⌃⌘E or right-click) across the project; changed files open as unsaved tabs so nothing is written until you save
+- **Quick fixes with ruff**: *Fix All* (⇧⌥⌘F) applies every safe autofix from your ruff config (unused imports, pyupgrade, …) and *Organize Imports* (⇧⌥O) sorts imports — both as a single undoable edit
 - **Format on save** with ruff (or black), on by default and toggled in the *Python* menu; *Format Document* with ⇧⌥F. Formatting is a single undoable edit that keeps the caret's line/column; formatter errors (e.g. a syntax error) show in the status bar and the file is saved unformatted.
 - **Interpreter detection**: uses the project's `.venv` / `venv` / `env` if present, else `$VIRTUAL_ENV`, else `python3`; pick another from the status bar or *Python → Choose Interpreter…*. The interpreter is passed to pyright, so imports from your venv resolve.
 - **REPL panel** (⌃⌘P): an interactive `python -i` in the project folder with the project interpreter; ↑/↓ history, interrupt, restart, clear. **Send Selection to REPL** (⌃↩) sends the selected code, or the caret's line, with indentation and block endings fixed up
@@ -59,7 +60,7 @@ You can also open `Package.swift` in Xcode.
 
 ## Roadmap
 
-- Code actions / quick fixes, document symbols outline
+- Per-diagnostic quick fixes (lightbulb) via `ruff server`
 - Jupyter notebook viewing
 - tree-sitter-python for incremental highlighting
 - Debugger: logpoints, hit counts, watch expressions

@@ -131,6 +131,12 @@ struct PyIDEApp: App {
                 Button("Format Document") { workspace.formatDocument() }
                     .keyboardShortcut("f", modifiers: [.shift, .option])
                     .disabled(!workspace.isPythonFile || workspace.isReadOnly)
+                Button("Fix All (ruff)") { workspace.transformCurrentDocument(.fixAll) }
+                    .keyboardShortcut("f", modifiers: [.shift, .option, .command])
+                    .disabled(!workspace.isPythonFile || workspace.isReadOnly)
+                Button("Organize Imports") { workspace.transformCurrentDocument(.organizeImports) }
+                    .keyboardShortcut("o", modifiers: [.shift, .option])
+                    .disabled(!workspace.isPythonFile || workspace.isReadOnly)
                 Toggle("Format on Save", isOn: Bindable(workspace).formatOnSave)
                 Divider()
                 Button("Choose Interpreter…") { workspace.presentInterpreterPanel() }

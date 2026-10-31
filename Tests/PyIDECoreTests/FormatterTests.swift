@@ -23,6 +23,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("x.py")
         #expect(formatter.arguments(for: file) == ["format", "--stdin-filename", file.path, "-"])
+        #expect(CodeFormatter(kind: .black, executable: file).arguments(for: file, operation: .fixAll) == nil)
         let big = String(repeating: "x = 1\n", count: 50_000)  // larger than a pipe buffer
         let out = try await formatter.format(big, file: file, environment: [:], currentDirectory: dir)
         #expect(out.count == big.count)
@@ -50,5 +51,20 @@ import Testing
                                              file: dir.appendingPathComponent("t.py"),
                                              environment: ToolLocator.environment(), currentDirectory: dir)
         #expect(out == "x = {\"a\": 1}\n\n\ndef f(a):\n    return a\n")
+    }
+
+    @Test(.enabled(if: ToolLocator.find("ruff") != nil), .timeLimit(.minutes(1)))
+    func fixesAndOrganizesImportsWithRealRuff() async throws {
+        let formatter = try #require(CodeFormatter.locate(interpreter: nil))
+        let dir = FileManager.default.temporaryDirectory
+        let source = "import sys\nimport os\nprint(os.sep, undefined_name)\n"
+        let env = ToolLocator.environment()
+        let fixed = try await formatter.format(source, file: dir.appendingPathComponent("t.py"), operation: .fixAll,
+                                               environment: env, currentDirectory: dir)
+        #expect(fixed == "import os\n\nprint(os.sep, undefined_name)\n" || fixed == "import os\nprint(os.sep, undefined_name)\n",
+                "fixed: \(fixed)")
+        let organized = try await formatter.format(source, file: dir.appendingPathComponent("t.py"), operation: .organizeImports,
+                                                   environment: env, currentDirectory: dir)
+        #expect(organized.hasPrefix("import os\nimport sys\n"), "organized: \(organized)")
     }
 }

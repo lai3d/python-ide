@@ -11,6 +11,19 @@ public struct CodeFormatter: Sendable, Hashable {
         public var errorDescription: String? { message }
     }
 
+    /// What to do to the source. Fixes need ruff; black can only format.
+    public enum Operation: Sendable {
+        case format, fixAll, organizeImports
+
+        public var title: String {
+            switch self {
+            case .format: "Format"
+            case .fixAll: "Fix All"
+            case .organizeImports: "Organize Imports"
+            }
+        }
+    }
+
     public let kind: Kind
     public let executable: URL
 
@@ -38,10 +51,15 @@ public struct CodeFormatter: Sendable, Hashable {
     }
 
     /// `--stdin-filename` lets the tool find the project's config and apply per-file settings.
-    public func arguments(for file: URL) -> [String] {
-        switch kind {
-        case .ruff: ["format", "--stdin-filename", file.path, "-"]
-        case .black: ["--quiet", "--stdin-filename", file.path, "-"]
+    public func arguments(for file: URL, operation: Operation = .format) -> [String]? {
+        switch (kind, operation) {
+        case (.ruff, .format): ["format", "--stdin-filename", file.path, "-"]
+        // `check --fix` on stdin prints the fixed source; --exit-zero because unfixable issues remain.
+        case (.ruff, .fixAll): ["check", "--fix", "--exit-zero", "--quiet", "--stdin-filename", file.path, "-"]
+        case (.ruff, .organizeImports):
+            ["check", "--select", "I", "--fix", "--exit-zero", "--quiet", "--stdin-filename", file.path, "-"]
+        case (.black, .format): ["--quiet", "--stdin-filename", file.path, "-"]
+        case (.black, _): nil
         }
     }
 
@@ -49,12 +67,15 @@ public struct CodeFormatter: Sendable, Hashable {
     public func format(
         _ source: String,
         file: URL,
+        operation: Operation = .format,
         environment: [String: String],
         currentDirectory: URL?,
         timeout: Duration = .seconds(10)
     ) async throws -> String {
         let executable = executable
-        let arguments = arguments(for: file)
+        guard let arguments = arguments(for: file, operation: operation) else {
+            throw Failure(message: "\(operation.title) needs ruff (uv tool install ruff)")
+        }
         let name = name
         return try await Task.detached {
             try Self.run(executable: executable, arguments: arguments, input: Data(source.utf8),
