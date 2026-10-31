@@ -6,9 +6,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Writing to a dead language server's stdin must not kill the app.
         signal(SIGPIPE, SIG_IGN)
-        // Needed when launched as a bare SwiftPM executable (no .app bundle).
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // Only for a bare SwiftPM executable (`swift run`, no .app bundle): make it a regular app
+        // and bring it forward. A bundled app gets both from LaunchServices, and calling these
+        // there can keep SwiftUI from opening the first window when linked against newer SDKs.
+        if Bundle.main.bundleIdentifier == nil {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
