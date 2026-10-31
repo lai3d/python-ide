@@ -214,6 +214,7 @@ final class Workspace {
         debugSession = nil
         for id in notebookKernels.keys { stopKernel(documentID: id) }
         notebookModels = [:]
+        notebookVirtualDocs = [:]
         breakpoints = [:]
         stopREPL()
         replOutput = ""
@@ -303,6 +304,7 @@ final class Workspace {
         let closing = documents.remove(at: index)
         sendDidClose(closing)
         stopKernel(documentID: closing.id)
+        closeVirtualNotebook(closing.id)
         notebookModels.removeValue(forKey: closing.id)
         for server in serverDiagnostics.keys { serverDiagnostics[server]?.removeValue(forKey: closing.id) }
         if currentFile.map(Self.key(for:)) == closing.id {
@@ -695,6 +697,8 @@ final class Workspace {
     private func storeDiagnostics(_ params: JSONValue, server: String) {
         guard let published = Diagnostic.parsePublish(params), let url = URL(string: published.uri) else { return }
         let key = Self.key(for: url)
+        // A notebook's virtual document (for completion) isn't a real file; keep it out of Problems.
+        if Self.isVirtualNotebookPath(key) { return }
         // Hints ("x is not accessed") are too noisy for the Problems list.
         let shown = published.diagnostics.filter { $0.severity != .hint }
         if shown.isEmpty {
@@ -827,6 +831,7 @@ final class Workspace {
             try client.notify("initialized", params: [:])
             try client.notify("workspace/didChangeConfiguration", params: ["settings": [:]])
             lspReady = true
+            notebookVirtualDocs = [:]  // a new server hasn't seen them
             lspStatus = "\(spec.name): ready"
             scheduleOutlineRefresh(after: .zero)
             for document in documents { sendDidOpen(document, to: client) }
@@ -1288,6 +1293,54 @@ final class Workspace {
             notebookRuns[model.documentID, default: [:]][runID] = cell.id
         }
         model.kernelStatus = .busy
+    }
+
+    // MARK: Notebook completion
+
+    /// Per notebook: the virtual document last sent to the language server, and its version.
+    @ObservationIgnored private var notebookVirtualDocs: [String: (text: String, version: Int)] = [:]
+
+    /// In-memory URI for a notebook's concatenated code cells (never written to disk).
+    private static func virtualURL(forNotebook id: String) -> URL {
+        let url = URL(fileURLWithPath: id)
+        return url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).pyide.py")
+    }
+
+    static func isVirtualNotebookPath(_ path: String) -> Bool { path.hasSuffix(".pyide.py") }
+
+    /// Completions at `offset` in a code cell, computed against all code cells together.
+    func notebookCompletions(in model: NotebookModel, cell id: UUID, offset: Int) async -> [CompletionItem] {
+        guard lspReady, let lsp, let cellIndex = model.index(of: id) else { return [] }
+        let code = model.cells.enumerated().filter { $0.element.kind == .code }.map { (index: $0.offset, source: $0.element.source) }
+        let map = NotebookSourceMap(codeCells: code)
+        guard let position = map.position(cell: cellIndex, source: model.cells[cellIndex].source, offset: offset) else { return [] }
+        let uri = JSONValue.string(Self.virtualURL(forNotebook: model.documentID).absoluteString)
+        if let previous = notebookVirtualDocs[model.documentID] {
+            if previous.text != map.text {
+                let version = previous.version + 1
+                notebookVirtualDocs[model.documentID] = (map.text, version)
+                try? lsp.notify("textDocument/didChange", params: [
+                    "textDocument": ["uri": uri, "version": .int(version)],
+                    "contentChanges": [["text": .string(map.text)]],
+                ])
+            }
+        } else {
+            notebookVirtualDocs[model.documentID] = (map.text, 1)
+            try? lsp.notify("textDocument/didOpen", params: [
+                "textDocument": ["uri": uri, "languageId": "python", "version": 1, "text": .string(map.text)],
+            ])
+        }
+        let result = try? await lsp.request("textDocument/completion", params: [
+            "textDocument": ["uri": uri], "position": position.json,
+        ])
+        return result.map(CompletionItem.parseList) ?? []
+    }
+
+    private func closeVirtualNotebook(_ id: String) {
+        guard notebookVirtualDocs.removeValue(forKey: id) != nil, lspReady else { return }
+        try? lsp?.notify("textDocument/didClose", params: [
+            "textDocument": ["uri": .string(Self.virtualURL(forNotebook: id).absoluteString)],
+        ])
     }
 
     func runAllCells(in model: NotebookModel) {

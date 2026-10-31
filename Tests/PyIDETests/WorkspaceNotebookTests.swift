@@ -67,3 +67,40 @@ import Testing
         #expect(model.cells.last?.outputs.first?["data"]?["text/plain"] == "False")
     }
 }
+
+@MainActor
+@Suite(.serialized) struct WorkspaceNotebookCompletionTests {
+    @Test(.enabled(if: LanguageServerSpec.locate(interpreter: nil) != nil), .timeLimit(.minutes(1)))
+    func completesUsingEarlierCells() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pyide-ws-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try """
+            {"cells": [
+              {"cell_type": "code", "id": "a", "metadata": {}, "execution_count": null, "outputs": [],
+               "source": ["%matplotlib inline\\n", "import math\\n", "def helper_fn(): pass"]},
+              {"cell_type": "markdown", "id": "m", "metadata": {}, "source": ["notes"]},
+              {"cell_type": "code", "id": "b", "metadata": {}, "execution_count": null, "outputs": [],
+               "source": ["math.sq"]}
+             ],
+             "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+            """.write(to: dir.appendingPathComponent("t.ipynb"), atomically: true, encoding: .utf8)
+
+        let workspace = Workspace()
+        await workspace.openFolder(dir)
+        guard case .success(let model)? = workspace.notebookModel() else {
+            Issue.record("notebook did not load")
+            return
+        }
+        let cell = model.cells[2]
+        let items = await workspace.notebookCompletions(in: model, cell: cell.id, offset: (cell.source as NSString).length)
+        #expect(items.contains { $0.label == "sqrt" }, "items: \(items.prefix(8).map(\.label))")
+
+        // Edit the cell: names defined in the first cell complete too (the virtual doc is updated).
+        model.setSource("help", of: cell.id)
+        let again = await workspace.notebookCompletions(in: model, cell: cell.id, offset: 4)
+        #expect(again.contains { $0.label == "helper_fn" }, "items: \(again.prefix(8).map(\.label))")
+        // The virtual document never shows up as a problem.
+        #expect(workspace.allProblems.allSatisfy { !$0.path.hasSuffix(".pyide.py") })
+    }
+}

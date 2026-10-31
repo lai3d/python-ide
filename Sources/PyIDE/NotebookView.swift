@@ -120,6 +120,7 @@ struct NotebookEditor: View {
 }
 
 struct CellView: View {
+    @Environment(Workspace.self) private var workspace
     let model: NotebookModel
     let cell: NotebookModel.Cell
     let readOnly: Bool
@@ -128,6 +129,10 @@ struct CellView: View {
     @State private var editingMarkdown = false
 
     private var isSelected: Bool { model.selectedCellID == cell.id }
+
+    private func complete(_ id: UUID, _ offset: Int) async -> [CompletionItem] {
+        await workspace.notebookCompletions(in: model, cell: id, offset: offset)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -168,7 +173,10 @@ struct CellView: View {
                        focused: isSelected,
                        onChange: { model.setSource($0, of: cell.id) },
                        onRun: run,
-                       onFocus: { model.selectedCellID = cell.id })
+                       onFocus: { model.selectedCellID = cell.id },
+                       complete: model.language == "python" ? { offset in
+                           await complete(cell.id, offset)
+                       } : nil)
                 .padding(.vertical, 6)
                 .padding(.horizontal, 4)
                 .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
@@ -269,6 +277,8 @@ struct CellEditor: NSViewRepresentable {
     var onChange: (String) -> Void
     var onRun: (_ advance: Bool) -> Void
     var onFocus: () -> Void
+    /// Completions at a UTF-16 offset in this cell (nil: no completion, e.g. markdown).
+    var complete: ((Int) async -> [CompletionItem])?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -293,6 +303,7 @@ struct CellEditor: NSViewRepresentable {
         view.string = text
         view.onRun = { advance in context.coordinator.parent.onRun(advance) }
         view.onFocus = { context.coordinator.parent.onFocus() }
+        view.onBlur = { context.coordinator.hideCompletions() }
         context.coordinator.restyle(view)
         return view
     }
@@ -325,17 +336,123 @@ struct CellEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CellEditor
         var lastFocused: Bool?
+        private let popup = CompletionPopup()
+        private var items: [CompletionItem] = []
+        private var completionTask: Task<Void, Never>?
+        private var lastReplacement: String?
+        private weak var textView: NSTextView?
 
-        init(_ parent: CellEditor) { self.parent = parent }
+        init(_ parent: CellEditor) {
+            self.parent = parent
+            super.init()
+            popup.onAccept = { [weak self] item in self?.accept(item) }
+        }
+
+        func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+            lastReplacement = replacementString
+            return true
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? CellTextView else { return }
+            textView = view
             restyle(view)
             parent.onChange(view.string)
+
+            let typed = lastReplacement
+            lastReplacement = nil
+            guard parent.complete != nil else { return }
+            if let typed, typed.utf16.count == 1, let unit = typed.utf16.first, unit == 0x2E || Identifier.isIdentifier(unit) {
+                if unit == 0x2E {
+                    items = []
+                    popup.hide()
+                    scheduleCompletion(in: view, after: .zero)
+                } else {
+                    refilter(in: view)
+                    scheduleCompletion(in: view, after: .milliseconds(80))
+                }
+            } else if typed == "", popup.isVisible {
+                refilter(in: view)
+            } else {
+                hideCompletions()
+            }
+        }
+
+        private func scheduleCompletion(in view: NSTextView, after delay: Duration) {
+            completionTask?.cancel()
+            completionTask = Task { [weak self, weak view] in
+                if delay > .zero { try? await Task.sleep(for: delay) }
+                guard !Task.isCancelled, let self, let view, let complete = self.parent.complete else { return }
+                let results = await complete(view.selectedRange().location)
+                guard !Task.isCancelled else { return }
+                self.items = results
+                self.refilter(in: view)
+            }
+        }
+
+        private func refilter(in view: NSTextView) {
+            guard let window = view.window, !items.isEmpty else {
+                popup.hide()
+                return
+            }
+            let ns = view.string as NSString
+            let caret = view.selectedRange().location
+            let start = Identifier.prefixStart(in: ns, before: caret)
+            let prefix = ns.substring(with: NSRange(location: start, length: caret - start))
+            if let first = prefix.utf16.first, !Identifier.isIdentifierStart(first) {
+                popup.hide()
+                return
+            }
+            let matches = items.filter { FuzzyMatch.matches(prefix, $0.filterText) }
+            if matches.isEmpty || (matches.count == 1 && matches[0].insertText == prefix) {
+                popup.hide()
+                return
+            }
+            let anchor = view.firstRect(forCharacterRange: NSRange(location: start, length: 0), actualRange: nil)
+            popup.show(matches, below: anchor, in: window)
+        }
+
+        func hideCompletions() {
+            completionTask?.cancel()
+            completionTask = nil
+            items = []
+            popup.hide()
+        }
+
+        private func accept(_ item: CompletionItem) {
+            guard let view = textView else { return }
+            hideCompletions()
+            let caret = view.selectedRange().location
+            let start = Identifier.prefixStart(in: view.string as NSString, before: caret)
+            view.insertText(item.insertText, replacementRange: NSRange(location: start, length: caret - start))
         }
 
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            self.textView = textView
+            if popup.isVisible {
+                switch selector {
+                case #selector(NSResponder.moveUp(_:)):
+                    popup.moveSelection(by: -1)
+                    return true
+                case #selector(NSResponder.moveDown(_:)):
+                    popup.moveSelection(by: 1)
+                    return true
+                case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+                    if let item = popup.selectedItem { accept(item) }
+                    return true
+                case #selector(NSResponder.cancelOperation(_:)):
+                    hideCompletions()
+                    return true
+                case #selector(NSResponder.deleteBackward(_:)):
+                    return false
+                default:
+                    hideCompletions()
+                }
+            }
             switch selector {
+            case #selector(NSResponder.cancelOperation(_:)), #selector(NSTextView.complete(_:)):
+                if parent.complete != nil, textView.isEditable { scheduleCompletion(in: textView, after: .zero) }
+                return true
             case #selector(NSResponder.insertNewline(_:)):
                 let ns = textView.string as NSString
                 let selection = textView.selectedRange()
@@ -369,6 +486,13 @@ struct CellEditor: NSViewRepresentable {
 final class CellTextView: NSTextView {
     var onRun: ((Bool) -> Void)?
     var onFocus: (() -> Void)?
+    var onBlur: (() -> Void)?
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onBlur?() }
+        return accepted
+    }
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
