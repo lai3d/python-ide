@@ -70,6 +70,11 @@ import Testing
 
 @MainActor
 @Suite(.serialized) struct WorkspaceNotebookCompletionTests {
+    private func waitUntil(_ timeout: Duration = .seconds(20), _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
+    }
+
     @Test(.enabled(if: LanguageServerSpec.locate(interpreter: nil) != nil), .timeLimit(.minutes(1)))
     func completesUsingEarlierCells() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pyide-ws-\(UUID().uuidString)")
@@ -101,6 +106,47 @@ import Testing
         let again = await workspace.notebookCompletions(in: model, cell: cell.id, offset: 4)
         #expect(again.contains { $0.label == "helper_fn" }, "items: \(again.prefix(8).map(\.label))")
         // The virtual document never shows up as a problem.
+        #expect(workspace.allProblems.allSatisfy { !$0.path.hasSuffix(".pyide.py") })
+    }
+
+    @Test(.enabled(if: LanguageServerSpec.locate(interpreter: nil) != nil), .timeLimit(.minutes(1)))
+    func showsDiagnosticsAndHoverInCells() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pyide-ws-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try """
+            {"cells": [
+              {"cell_type": "code", "id": "a", "metadata": {}, "execution_count": null, "outputs": [],
+               "source": ["import math\\n", "x = 1"]},
+              {"cell_type": "markdown", "id": "m", "metadata": {}, "source": ["notes"]},
+              {"cell_type": "code", "id": "b", "metadata": {}, "execution_count": null, "outputs": [],
+               "source": ["print(undefined_name)\\n", "math.sqrt(x)"]}
+             ],
+             "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+            """.write(to: dir.appendingPathComponent("t.ipynb"), atomically: true, encoding: .utf8)
+
+        let workspace = Workspace()
+        await workspace.openFolder(dir)
+        guard case .success(let model)? = workspace.notebookModel() else {
+            Issue.record("notebook did not load")
+            return
+        }
+        let cell = model.cells[2]
+        try await waitUntil { !(model.cellDiagnostics[cell.id] ?? []).isEmpty }
+        let problems = model.cellDiagnostics[cell.id] ?? []
+        // Only the undefined name: `math`/`x` come from the first cell, and the trailing
+        // expression (the cell's output) isn't flagged.
+        #expect(problems.count == 1, "\(problems.map(\.message))")
+        #expect(problems.first?.start == TextPosition(line: 0, character: 6))
+        #expect(model.cellDiagnostics[model.cells[0].id] == nil)
+
+        let hover = await workspace.notebookHover(in: model, cell: cell.id, offset: 28)  // on `sqrt`
+        #expect(hover?.contains("sqrt") == true, "hover: \(hover ?? "nil")")
+
+        // Fixing the cell clears its problem once the server re-checks.
+        model.setSource("print(x)\nmath.sqrt(x)", of: cell.id)
+        try await waitUntil { (model.cellDiagnostics[cell.id] ?? []).isEmpty }
+        #expect((model.cellDiagnostics[cell.id] ?? []).isEmpty)
         #expect(workspace.allProblems.allSatisfy { !$0.path.hasSuffix(".pyide.py") })
     }
 }

@@ -30,7 +30,7 @@ struct PyIDEApp: App {
     @State private var workspace = Workspace()
 
     init() {
-        // `PyIDE <folder>`: Workspace reads the folder from CommandLine.arguments itself. Without
+        // `PyIDE <folder or file>`: Workspace reads paths from CommandLine.arguments itself. Without
         // this, AppKit also treats the argument as a document to open, and (linked against the
         // macOS 26 SDK, as release builds are) SwiftUI then never opens the main window.
         UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO"])

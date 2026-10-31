@@ -33,6 +33,10 @@ public final class NotebookModel {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     /// Receives the new JSON text after changes.
     @ObservationIgnored public var onSerialize: (String) -> Void = { _ in }
+    /// Called after any edit to the cells (sources, order, kinds), before the debounced save.
+    @ObservationIgnored public var onCellsChanged: () -> Void = {}
+    /// Language-server diagnostics per code cell, in cell coordinates.
+    public var cellDiagnostics: [UUID: [Diagnostic]] = [:]
 
     public init(documentID: String, text: String) throws {
         let parsed = try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
@@ -156,6 +160,7 @@ public final class NotebookModel {
 
     /// Schedules writing JSON back to the document.
     public func changed() {
+        onCellsChanged()
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(250))

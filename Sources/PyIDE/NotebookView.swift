@@ -176,6 +176,10 @@ struct CellView: View {
                        onFocus: { model.selectedCellID = cell.id },
                        complete: model.language == "python" ? { offset in
                            await complete(cell.id, offset)
+                       } : nil,
+                       diagnostics: model.cellDiagnostics[cell.id] ?? [],
+                       hover: model.language == "python" ? { offset in
+                           await workspace.notebookHover(in: model, cell: cell.id, offset: offset)
                        } : nil)
                 .padding(.vertical, 6)
                 .padding(.horizontal, 4)
@@ -279,6 +283,10 @@ struct CellEditor: NSViewRepresentable {
     var onFocus: () -> Void
     /// Completions at a UTF-16 offset in this cell (nil: no completion, e.g. markdown).
     var complete: ((Int) async -> [CompletionItem])?
+    /// Problems in this cell, in cell coordinates.
+    var diagnostics: [Diagnostic] = []
+    /// Hover markdown at a UTF-16 offset (nil: no hover).
+    var hover: ((Int) async -> String?)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -304,6 +312,8 @@ struct CellEditor: NSViewRepresentable {
         view.onRun = { advance in context.coordinator.parent.onRun(advance) }
         view.onFocus = { context.coordinator.parent.onFocus() }
         view.onBlur = { context.coordinator.hideCompletions() }
+        view.onMouseMoved = { index in context.coordinator.mouseMoved(to: index, in: view) }
+        view.onMouseExited = { context.coordinator.endHover() }
         context.coordinator.restyle(view)
         return view
     }
@@ -313,6 +323,8 @@ struct CellEditor: NSViewRepresentable {
         if view.isEditable != editable { view.isEditable = editable }
         if view.string != text {
             view.string = text
+            context.coordinator.restyle(view)
+        } else if context.coordinator.appliedDiagnostics != diagnostics {
             context.coordinator.restyle(view)
         }
         if focused, view.window != nil, view.window?.firstResponder !== view, context.coordinator.lastFocused != true {
@@ -341,6 +353,10 @@ struct CellEditor: NSViewRepresentable {
         private var completionTask: Task<Void, Never>?
         private var lastReplacement: String?
         private weak var textView: NSTextView?
+        var appliedDiagnostics: [Diagnostic] = []
+        private var hoverTask: Task<Void, Never>?
+        private var hoverWord: NSRange?
+        private var hoverPopover: NSPopover?
 
         init(_ parent: CellEditor) {
             self.parent = parent
@@ -356,6 +372,7 @@ struct CellEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? CellTextView else { return }
             textView = view
+            endHover()
             restyle(view)
             parent.onChange(view.string)
 
@@ -478,7 +495,61 @@ struct CellEditor: NSViewRepresentable {
                     storage.addAttribute(.foregroundColor, value: EditorTheme.color(for: token.kind), range: token.range)
                 }
             }
+            let index = LineIndex(view.string)
+            for diagnostic in parent.diagnostics {
+                var range = index.range(from: diagnostic.start, to: diagnostic.end)
+                if range.length == 0 { range.length = min(1, storage.length - range.location) }
+                guard range.length > 0 else { continue }
+                storage.addAttributes([
+                    .underlineStyle: NSUnderlineStyle.thick.rawValue | NSUnderlineStyle.patternDot.rawValue,
+                    .underlineColor: diagnostic.severity == .error ? NSColor.systemRed : NSColor.systemYellow,
+                    .toolTip: diagnostic.message,
+                ], range: range)
+            }
             storage.endEditing()
+            appliedDiagnostics = parent.diagnostics
+        }
+
+        // MARK: Hover
+
+        func mouseMoved(to index: Int?, in view: NSTextView) {
+            guard parent.hover != nil, !popup.isVisible else { return }
+            guard let index, let word = Identifier.wordRange(in: view.string as NSString, at: index) else {
+                endHover()
+                return
+            }
+            if word == hoverWord { return }
+            endHover()
+            hoverWord = word
+            hoverTask = Task { [weak self, weak view] in
+                try? await Task.sleep(for: .milliseconds(450))
+                guard !Task.isCancelled, let self, let hover = self.parent.hover else { return }
+                let markdown = await hover(index)
+                guard !Task.isCancelled, self.hoverWord == word, let markdown, let view else { return }
+                self.showHover(markdown, for: word, in: view)
+            }
+        }
+
+        func endHover() {
+            hoverTask?.cancel()
+            hoverTask = nil
+            hoverWord = nil
+            hoverPopover?.close()
+            hoverPopover = nil
+        }
+
+        private func showHover(_ markdown: String, for range: NSRange, in view: NSTextView) {
+            guard let window = view.window else { return }
+            let screenRect = view.firstRect(forCharacterRange: range, actualRange: nil)
+            let viewRect = view.convert(window.convertFromScreen(screenRect), from: nil)
+            let host = NSHostingController(rootView: HoverView(markdown: markdown))
+            host.sizingOptions = .preferredContentSize
+            let popover = NSPopover()
+            popover.behavior = .semitransient
+            popover.animates = false
+            popover.contentViewController = host
+            popover.show(relativeTo: viewRect, of: view, preferredEdge: .minY)
+            hoverPopover = popover
         }
     }
 }
@@ -487,6 +558,29 @@ final class CellTextView: NSTextView {
     var onRun: ((Bool) -> Void)?
     var onFocus: (() -> Void)?
     var onBlur: (() -> Void)?
+    var onMouseMoved: ((Int?) -> Void)?
+    var onMouseExited: (() -> Void)?
+    private var hoverArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        onMouseMoved?(characterIndex(atWindowPoint: event.locationInWindow))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        onMouseExited?()
+    }
 
     override func resignFirstResponder() -> Bool {
         let accepted = super.resignFirstResponder()

@@ -194,18 +194,21 @@ final class Workspace {
         Task { await openFolder(url) }
     }
 
-    /// Opens a folder passed on the command line, e.g. `swift run PyIDE ./Examples/hello`.
+    /// Opens a folder and/or file passed on the command line, e.g. `swift run PyIDE ./Examples/hello`
+    /// or `PyIDE ./Examples/hello/demo.ipynb` (a file alone opens its folder as the project).
     func handleLaunchArguments() async {
         guard !handledLaunchArguments else { return }
         handledLaunchArguments = true
-        for arg in CommandLine.arguments.dropFirst() {
+        var folder: URL?
+        var file: URL?
+        for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
             var isDir: ObjCBool = false
             let url = URL(fileURLWithPath: arg).standardizedFileURL
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-                await openFolder(url)
-                return
-            }
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue { folder = folder ?? url } else { file = file ?? url }
         }
+        if let target = folder ?? file?.deletingLastPathComponent() { await openFolder(target) }
+        if let file { openFile(file) }
     }
 
     func openFolder(_ url: URL) async {
@@ -697,8 +700,11 @@ final class Workspace {
     private func storeDiagnostics(_ params: JSONValue, server: String) {
         guard let published = Diagnostic.parsePublish(params), let url = URL(string: published.uri) else { return }
         let key = Self.key(for: url)
-        // A notebook's virtual document (for completion) isn't a real file; keep it out of Problems.
-        if Self.isVirtualNotebookPath(key) { return }
+        // A notebook's virtual document isn't a real file; its problems are shown on the cells.
+        if Self.isVirtualNotebookPath(key) {
+            if server == "pyright" { storeNotebookDiagnostics(published.diagnostics, virtualKey: key) }
+            return
+        }
         // Hints ("x is not accessed") are too noisy for the Problems list.
         let shown = published.diagnostics.filter { $0.severity != .hint }
         if shown.isEmpty {
@@ -835,6 +841,7 @@ final class Workspace {
             lspStatus = "\(spec.name): ready"
             scheduleOutlineRefresh(after: .zero)
             for document in documents { sendDidOpen(document, to: client) }
+            for model in notebookModels.values { syncNotebookDocument(model) }
         } catch {
             if lsp === client { lsp = nil }
             lspStatus = "\(spec.name) failed: \(error.localizedDescription)"
@@ -1293,6 +1300,13 @@ final class Workspace {
             }
             if let old = notebookModels[document.id] { model.kernelStatus = old.kernelStatus }
             notebookModels[document.id] = model
+            model.onCellsChanged = { [weak self, weak model] in
+                guard let self, let model else { return }
+                self.scheduleNotebookSync(model)
+            }
+            // Cells are new objects: diagnostics must be re-mapped to them.
+            notebookVirtualDocs[document.id]?.cells = [:]
+            syncNotebookDocument(model)
             return .success(model)
         } catch {
             return .failure(error)
@@ -1312,8 +1326,10 @@ final class Workspace {
 
     // MARK: Notebook completion
 
-    /// Per notebook: the virtual document last sent to the language server, and its version.
-    @ObservationIgnored private var notebookVirtualDocs: [String: (text: String, version: Int)] = [:]
+    /// Per notebook: the virtual document last sent to the language server, its version, and
+    /// the code cells it was built from (to map published diagnostics back to cells).
+    @ObservationIgnored private var notebookVirtualDocs: [String: (map: NotebookSourceMap, version: Int, cells: [Int: UUID])] = [:]
+    @ObservationIgnored private var notebookSyncTasks: [String: Task<Void, Never>] = [:]
 
     /// In-memory URI for a notebook's concatenated code cells (never written to disk).
     private static func virtualURL(forNotebook id: String) -> URL {
@@ -1323,32 +1339,79 @@ final class Workspace {
 
     static func isVirtualNotebookPath(_ path: String) -> Bool { path.hasSuffix(".pyide.py") }
 
-    /// Completions at `offset` in a code cell, computed against all code cells together.
-    func notebookCompletions(in model: NotebookModel, cell id: UUID, offset: Int) async -> [CompletionItem] {
-        guard lspReady, let lsp, let cellIndex = model.index(of: id) else { return [] }
-        let code = model.cells.enumerated().filter { $0.element.kind == .code }.map { (index: $0.offset, source: $0.element.source) }
-        let map = NotebookSourceMap(codeCells: code)
-        guard let position = map.position(cell: cellIndex, source: model.cells[cellIndex].source, offset: offset) else { return [] }
+    /// Sends the notebook's code cells to the language server as one document (if changed).
+    @discardableResult
+    private func syncNotebookDocument(_ model: NotebookModel) -> NotebookSourceMap? {
+        guard lspReady, let lsp, model.language == "python" else { return nil }
+        notebookSyncTasks.removeValue(forKey: model.documentID)?.cancel()
+        let code = model.cells.enumerated().filter { $0.element.kind == .code }
+        let map = NotebookSourceMap(codeCells: code.map { (index: $0.offset, source: $0.element.source) })
+        let cells = Dictionary(uniqueKeysWithValues: code.map { ($0.offset, $0.element.id) })
         let uri = JSONValue.string(Self.virtualURL(forNotebook: model.documentID).absoluteString)
         if let previous = notebookVirtualDocs[model.documentID] {
-            if previous.text != map.text {
-                let version = previous.version + 1
-                notebookVirtualDocs[model.documentID] = (map.text, version)
+            guard previous.map.text != map.text || previous.cells != cells else { return map }
+            let version = previous.version + 1
+            notebookVirtualDocs[model.documentID] = (map, version, cells)
+            if previous.map.text != map.text {
                 try? lsp.notify("textDocument/didChange", params: [
                     "textDocument": ["uri": uri, "version": .int(version)],
                     "contentChanges": [["text": .string(map.text)]],
                 ])
             }
         } else {
-            notebookVirtualDocs[model.documentID] = (map.text, 1)
+            notebookVirtualDocs[model.documentID] = (map, 1, cells)
             try? lsp.notify("textDocument/didOpen", params: [
                 "textDocument": ["uri": uri, "languageId": "python", "version": 1, "text": .string(map.text)],
             ])
         }
-        let result = try? await lsp.request("textDocument/completion", params: [
-            "textDocument": ["uri": uri], "position": position.json,
-        ])
+        return map
+    }
+
+    /// Re-syncs shortly after typing stops, so diagnostics follow edits.
+    private func scheduleNotebookSync(_ model: NotebookModel) {
+        notebookSyncTasks[model.documentID]?.cancel()
+        notebookSyncTasks[model.documentID] = Task { [weak self, weak model] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, let model else { return }
+            self.syncNotebookDocument(model)
+        }
+    }
+
+    /// Diagnostics published for a notebook's virtual document: shown on the cells.
+    private func storeNotebookDiagnostics(_ diagnostics: [Diagnostic], virtualKey: String) {
+        guard let (id, entry) = notebookVirtualDocs.first(where: {
+            Self.key(for: Self.virtualURL(forNotebook: $0.key)) == virtualKey
+        }), let model = notebookModels[id] else { return }
+        var byCell: [UUID: [Diagnostic]] = [:]
+        for (index, list) in entry.map.cellDiagnostics(diagnostics) {
+            if let cell = entry.cells[index] { byCell[cell] = list }
+        }
+        if model.cellDiagnostics != byCell { model.cellDiagnostics = byCell }
+    }
+
+    /// Position of a cell offset in the (freshly synced) virtual document.
+    private func notebookPosition(in model: NotebookModel, cell id: UUID, offset: Int) -> (LSPClient, JSONValue)? {
+        guard let lsp, let cellIndex = model.index(of: id), model.cells[cellIndex].kind == .code,
+              let map = syncNotebookDocument(model),
+              let position = map.position(cell: cellIndex, source: model.cells[cellIndex].source, offset: offset)
+        else { return nil }
+        let uri = JSONValue.string(Self.virtualURL(forNotebook: model.documentID).absoluteString)
+        return (lsp, ["textDocument": ["uri": uri], "position": position.json])
+    }
+
+    /// Completions at `offset` in a code cell, computed against all code cells together.
+    func notebookCompletions(in model: NotebookModel, cell id: UUID, offset: Int) async -> [CompletionItem] {
+        guard case let (lsp, params)? = notebookPosition(in: model, cell: id, offset: offset) else { return [] }
+        let result = try? await lsp.request("textDocument/completion", params: params)
         return result.map(CompletionItem.parseList) ?? []
+    }
+
+    /// Hover markdown at `offset` in a code cell.
+    func notebookHover(in model: NotebookModel, cell id: UUID, offset: Int) async -> String? {
+        guard case let (lsp, params)? = notebookPosition(in: model, cell: id, offset: offset),
+              let result = try? await lsp.request("textDocument/hover", params: params)
+        else { return nil }
+        return HoverContent.parse(result).map { String($0.prefix(4000)) }
     }
 
     private func closeVirtualNotebook(_ id: String) {

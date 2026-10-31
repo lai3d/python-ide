@@ -772,19 +772,6 @@ final class CodeTextView: NSTextView {
         }
         return super.performKeyEquivalent(with: event)
     }
-
-    /// Index of the character under a window point, or nil when the point isn't over text.
-    func characterIndex(atWindowPoint windowPoint: NSPoint) -> Int? {
-        let length = (string as NSString).length
-        guard length > 0, let window else { return nil }
-        let screenPoint = window.convertPoint(toScreen: windowPoint)
-        let insertion = characterIndexForInsertion(at: convert(windowPoint, from: nil))
-        for candidate in [insertion, insertion - 1] where candidate >= 0 && candidate < length {
-            let rect = firstRect(forCharacterRange: NSRange(location: candidate, length: 1), actualRange: nil)
-            if rect.width > 0, rect.insetBy(dx: -0.5, dy: -0.5).contains(screenPoint) { return candidate }
-        }
-        return nil
-    }
 }
 
 /// On macOS 14+ a scroll view's ruler overlays the content: the clip view gets a left
@@ -811,5 +798,20 @@ final class EditorScrollView: NSScrollView {
         let insets = contentView.contentInsets
         contentView.scroll(to: NSPoint(x: -insets.left, y: -insets.top))
         reflectScrolledClipView(contentView)
+    }
+}
+
+extension NSTextView {
+    /// Index of the character under a window point, or nil when the point isn't over text.
+    func characterIndex(atWindowPoint windowPoint: NSPoint) -> Int? {
+        let length = (string as NSString).length
+        guard length > 0, let window else { return nil }
+        let screenPoint = window.convertPoint(toScreen: windowPoint)
+        let insertion = characterIndexForInsertion(at: convert(windowPoint, from: nil))
+        for candidate in [insertion, insertion - 1] where candidate >= 0 && candidate < length {
+            let rect = firstRect(forCharacterRange: NSRange(location: candidate, length: 1), actualRange: nil)
+            if rect.width > 0, rect.insetBy(dx: -0.5, dy: -0.5).contains(screenPoint) { return candidate }
+        }
+        return nil
     }
 }
