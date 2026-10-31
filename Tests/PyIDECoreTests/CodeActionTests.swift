@@ -68,3 +68,22 @@ import Testing
         await client.shutdown()
     }
 }
+
+@Suite struct DiagnosticMergeTests {
+    private func diag(_ line: Int, _ a: Int, _ b: Int, _ code: String, _ severity: Diagnostic.Severity = .error) -> Diagnostic {
+        Diagnostic(start: TextPosition(line: line, character: a), end: TextPosition(line: line, character: b),
+                   severity: severity, message: code, code: code)
+    }
+
+    @Test func dropsRuffDuplicatesOfPyrightProblems() {
+        let pyright = [diag(3, 14, 28, "reportUndefinedVariable")]
+        let ruff = [diag(3, 14, 28, "F821"), diag(0, 7, 10, "F401", .warning), diag(5, 0, 3, "F821")]
+        let merged = Diagnostic.merge(primary: pyright, ruff: ruff)
+        #expect(merged.map(\.code) == ["F401", "reportUndefinedVariable", "F821"])
+    }
+
+    @Test func keepsEverythingWithoutPyright() {
+        let ruff = [diag(1, 0, 1, "F821")]
+        #expect(Diagnostic.merge(primary: [], ruff: ruff).count == 1)
+    }
+}

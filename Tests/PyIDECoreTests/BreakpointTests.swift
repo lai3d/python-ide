@@ -39,5 +39,7 @@ import Testing
     @Test func encodesConditions() {
         #expect(SourceBreakpoint(line: 3).json == ["line": 3])
         #expect(SourceBreakpoint(line: 3, condition: "i == 2").json == ["line": 3, "condition": "i == 2"])
+        #expect(SourceBreakpoint(line: 4, spec: BreakpointSpec(logMessage: "i={i}")).json == ["line": 4, "logMessage": "i={i}"])
+        #expect(SourceBreakpoint(line: 4, spec: BreakpointSpec()).json == ["line": 4])
     }
 }

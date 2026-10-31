@@ -102,19 +102,47 @@ struct CallStackList: View {
 }
 
 struct VariablesTree: View {
+    @Environment(Workspace.self) private var workspace
     let session: DebugSession
+    @State private var newWatch = ""
 
     var body: some View {
         List {
-            if session.scopes.isEmpty {
-                Text(session.isStopped ? "No variables" : "Variables appear when paused")
-                    .foregroundStyle(.secondary)
+            Section("Watch") {
+                ForEach(session.watchExpressions, id: \.self) { expression in
+                    HStack(spacing: 6) {
+                        Text(expression).font(.system(.callout, design: .monospaced)).fontWeight(.medium)
+                        Text(session.watchValues[expression] ?? (session.isStopped ? "…" : "—"))
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle((session.watchValues[expression] ?? "").hasPrefix("⚠︎") ? .orange : .secondary)
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 4)
+                        Button { workspace.removeWatch(expression) } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.tertiary)
+                            .help("Remove watch")
+                    }
+                }
+                TextField("Add watch expression", text: $newWatch)
+                    .textFieldStyle(.plain)
+                    .font(.system(.callout, design: .monospaced))
+                    .onSubmit {
+                        workspace.addWatch(newWatch)
+                        newWatch = ""
+                    }
             }
-            ForEach(Array(session.scopes.enumerated()), id: \.element.id) { index, scope in
-                VariableNode(variable: scope, session: session, initiallyExpanded: index == 0)
+            Section("Variables") {
+                if session.scopes.isEmpty {
+                    Text(session.isStopped ? "No variables" : "Variables appear when paused")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(Array(session.scopes.enumerated()), id: \.element.id) { index, scope in
+                    VariableNode(variable: scope, session: session, initiallyExpanded: index == 0)
+                }
             }
         }
-        .listStyle(.plain)
+        .listStyle(.sidebar)
         .id(session.stopCount)  // references are only valid for the current stop
     }
 }

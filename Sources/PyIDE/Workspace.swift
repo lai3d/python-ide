@@ -74,11 +74,13 @@ final class Workspace {
 
     /// All servers' diagnostics per normalized path, in position order.
     var diagnostics: [String: [Diagnostic]] {
-        var merged: [String: [Diagnostic]] = [:]
-        for byPath in serverDiagnostics.values {
-            for (path, list) in byPath { merged[path, default: []] += list }
-        }
-        return merged.mapValues { $0.sorted { ($0.start.line, $0.start.character) < ($1.start.line, $1.start.character) } }
+        let paths = Set(serverDiagnostics.values.flatMap(\.keys))
+        return Dictionary(uniqueKeysWithValues: paths.map { ($0, mergedDiagnostics(for: $0)) })
+    }
+
+    /// The main server's diagnostics plus ruff's, without problems both report.
+    private func mergedDiagnostics(for key: String) -> [Diagnostic] {
+        Diagnostic.merge(primary: serverDiagnostics["pyright"]?[key] ?? [], ruff: serverDiagnostics["ruff"]?[key] ?? [])
     }
 
     /// A quick-fix menu for the editor to pop up at the caret.
@@ -106,8 +108,8 @@ final class Workspace {
     /// Current editor selection (UTF-16), reported by the editor.
     @ObservationIgnored var selectedRange = NSRange(location: 0, length: 0)
 
-    /// Breakpoints per normalized path: zero-based line → condition ("" when unconditional).
-    private(set) var breakpoints: [String: [Int: String]] = [:]
+    /// Breakpoints per normalized path, keyed by zero-based line.
+    private(set) var breakpoints: [String: [Int: BreakpointSpec]] = [:]
     private(set) var debugSession: DebugSession?
     private(set) var executionLocation: ExecutionLocation?
 
@@ -132,9 +134,7 @@ final class Workspace {
 
     var currentDiagnostics: [Diagnostic] {
         guard let currentFile else { return [] }
-        let key = Self.key(for: currentFile)
-        return serverDiagnostics.values.flatMap { $0[key] ?? [] }
-            .sorted { ($0.start.line, $0.start.character) < ($1.start.line, $1.start.character) }
+        return mergedDiagnostics(for: Self.key(for: currentFile))
     }
 
     var allProblems: [ProblemItem] {
@@ -1040,14 +1040,18 @@ final class Workspace {
     var currentBreakpoints: Set<Int> { Set((breakpoints[currentDocumentID] ?? [:]).keys) }
 
     var currentConditionalBreakpoints: Set<Int> {
-        Set((breakpoints[currentDocumentID] ?? [:]).filter { !$0.value.isEmpty }.keys)
+        Set((breakpoints[currentDocumentID] ?? [:]).filter { $0.value.isConditional && !$0.value.isLogpoint }.keys)
     }
 
-    private static func sourceBreakpoints(_ lines: [Int: String]) -> [SourceBreakpoint] {
-        lines.map { SourceBreakpoint(line: $0.key + 1, condition: $0.value.isEmpty ? nil : $0.value) }
+    var currentLogpoints: Set<Int> {
+        Set((breakpoints[currentDocumentID] ?? [:]).filter { $0.value.isLogpoint }.keys)
     }
 
-    private func updateBreakpoints(_ lines: [Int: String], for key: String) {
+    private static func sourceBreakpoints(_ lines: [Int: BreakpointSpec]) -> [SourceBreakpoint] {
+        lines.map { SourceBreakpoint(line: $0.key + 1, spec: $0.value) }
+    }
+
+    private func updateBreakpoints(_ lines: [Int: BreakpointSpec], for key: String) {
         breakpoints[key] = lines.isEmpty ? nil : lines
         debugSession?.setBreakpoints(path: key, Self.sourceBreakpoints(lines))
     }
@@ -1055,20 +1059,62 @@ final class Workspace {
     /// Asks for a Python expression; the breakpoint only pauses when it is true.
     func editBreakpointCondition(line: Int) {
         let key = currentDocumentID
+        guard let value = Self.prompt(
+            title: "Breakpoint condition (line \(line + 1))",
+            message: "Pause only when this Python expression is true. Leave empty to always pause.",
+            placeholder: "e.g. i == 3", initial: breakpoints[key]?[line]?.condition ?? "") else { return }
+        var lines = breakpoints[key] ?? [:]
+        var spec = lines[line] ?? BreakpointSpec()
+        spec.condition = value
+        lines[line] = spec
+        updateBreakpoints(lines, for: key)
+    }
+
+    /// A logpoint prints a message (with `{expression}` placeholders) instead of pausing.
+    func editLogMessage(line: Int) {
+        let key = currentDocumentID
+        guard let value = Self.prompt(
+            title: "Logpoint (line \(line + 1))",
+            message: "Print this message to the Debug console without pausing. Put expressions in braces. "
+                + "Leave empty to make it a normal breakpoint again.",
+            placeholder: "e.g. i = {i}, total = {total}", initial: breakpoints[key]?[line]?.logMessage ?? "") else { return }
+        var lines = breakpoints[key] ?? [:]
+        var spec = lines[line] ?? BreakpointSpec()
+        spec.logMessage = value
+        lines[line] = spec
+        updateBreakpoints(lines, for: key)
+    }
+
+    private static func prompt(title: String, message: String, placeholder: String, initial: String) -> String? {
         let alert = NSAlert()
-        alert.messageText = "Breakpoint condition (line \(line + 1))"
-        alert.informativeText = "Pause only when this Python expression is true. Leave empty to always pause."
-        let field = NSTextField(string: breakpoints[key]?[line] ?? "")
-        field.placeholderString = "e.g. i == 3"
-        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(string: initial)
+        field.placeholderString = placeholder
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
         alert.accessoryView = field
         alert.addButton(withTitle: "Set")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        var lines = breakpoints[key] ?? [:]
-        lines[line] = field.stringValue.trimmingCharacters(in: .whitespaces)
-        updateBreakpoints(lines, for: key)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return field.stringValue.trimmingCharacters(in: .whitespaces)
+    }
+
+    // MARK: Watch expressions
+
+    /// Re-evaluated in the selected frame every time the debugger pauses; kept across sessions.
+    private(set) var watchExpressions: [String] = []
+
+    func addWatch(_ expression: String) {
+        let trimmed = expression.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !watchExpressions.contains(trimmed) else { return }
+        watchExpressions.append(trimmed)
+        debugSession?.setWatches(watchExpressions)
+    }
+
+    func removeWatch(_ expression: String) {
+        watchExpressions.removeAll { $0 == expression }
+        debugSession?.setWatches(watchExpressions)
     }
 
     func removeBreakpoint(line: Int) {
@@ -1086,7 +1132,7 @@ final class Workspace {
         guard let currentFile, Self.isPython(currentFile) else { return }
         let key = currentDocumentID
         var lines = breakpoints[key] ?? [:]
-        if lines[line] != nil { lines.removeValue(forKey: line) } else { lines[line] = "" }
+        if lines[line] != nil { lines.removeValue(forKey: line) } else { lines[line] = BreakpointSpec() }
         updateBreakpoints(lines, for: key)
     }
 
@@ -1135,6 +1181,7 @@ final class Workspace {
             guard let self, self.debugSession === session else { return }
             self.executionLocation = nil
         }
+        session.setWatches(watchExpressions)
         debugSession = session
         bottomTab = .debug
         session.start(python: python, program: program, cwd: cwd, environment: environment,

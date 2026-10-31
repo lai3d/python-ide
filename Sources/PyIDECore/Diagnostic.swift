@@ -61,3 +61,27 @@ public struct Diagnostic: Sendable, Hashable, Identifiable {
         return TextPosition(line: line, character: character)
     }
 }
+
+public extension Diagnostic {
+    /// ruff rules that pyright also checks (undefined / redefined names). When pyright reports a
+    /// diagnostic on the same range, the ruff copy is dropped so each problem shows once.
+    static let ruffRulesCoveredByPyright: Set<String> = ["F821", "F822", "F811", "F823", "F632", "E999"]
+
+    /// Merges the main server's diagnostics with ruff's, dropping ruff duplicates.
+    static func merge(primary: [Diagnostic], ruff: [Diagnostic]) -> [Diagnostic] {
+        let primaryRanges = Set(primary.map { RangeKey(start: $0.start, end: $0.end) })
+        let primaryLines = Set(primary.map(\.start.line))
+        let kept = ruff.filter { diagnostic in
+            guard let code = diagnostic.code, ruffRulesCoveredByPyright.contains(code) else { return true }
+            // Syntax errors rarely share exact ranges; match those by line.
+            if code == "E999" { return !primaryLines.contains(diagnostic.start.line) }
+            return !primaryRanges.contains(RangeKey(start: diagnostic.start, end: diagnostic.end))
+        }
+        return (primary + kept).sorted { ($0.start.line, $0.start.character) < ($1.start.line, $1.start.character) }
+    }
+
+    private struct RangeKey: Hashable {
+        let start: TextPosition
+        let end: TextPosition
+    }
+}

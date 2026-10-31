@@ -20,12 +20,12 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
   - **signature help** while typing a call: pops up on `(` / `,` with the current parameter highlighted; Esc dismisses
   - **find references** (⌥⌘R or right-click): results in a References panel, click to jump
   - **rename symbol** (⌃⌘E or right-click) across the project; changed files open as unsaved tabs so nothing is written until you save
-- **ruff language server** (`ruff server`, started automatically when ruff is installed) alongside pyright: lint diagnostics with rule codes in the Problems panel, and **per-problem quick fixes** — ⌥↩ (or right-click → *Quick Fix…*) on a line lists fixes such as "Remove unused import", "Disable for this line", then *Fix all* / *Organize imports*
+- **ruff language server** (`ruff server`, started automatically when ruff is installed) alongside pyright: lint diagnostics with rule codes in the Problems panel (problems pyright also reports, like undefined names, are shown once), and **per-problem quick fixes** — ⌥↩ (or right-click → *Quick Fix…*) on a line lists fixes such as "Remove unused import", "Disable for this line", then *Fix all* / *Organize imports*
 - **Quick fixes with ruff**: *Fix All* (⇧⌥⌘F) applies every safe autofix from your ruff config (unused imports, pyupgrade, …) and *Organize Imports* (⇧⌥O) sorts imports — both as a single undoable edit
 - **Format on save** with ruff (or black), on by default and toggled in the *Python* menu; *Format Document* with ⇧⌥F. Formatting is a single undoable edit that keeps the caret's line/column; formatter errors (e.g. a syntax error) show in the status bar and the file is saved unformatted.
 - **Interpreter detection**: uses the project's `.venv` / `venv` / `env` if present, else `$VIRTUAL_ENV`, else `python3`; pick another from the status bar or *Python → Choose Interpreter…*. The interpreter is passed to pyright, so imports from your venv resolve.
 - **REPL panel** (⌃⌘P): an interactive `python -i` in the project folder with the project interpreter; ↑/↓ history, interrupt, restart, clear. **Send Selection to REPL** (⌃↩) sends the selected code, or the caret's line, with indentation and block endings fixed up
-- **Debugger** (debugpy over DAP): click a line number (or ⌘\\) to set a breakpoint; **Debug File** (⇧⌘D or the ladybug button) pauses on breakpoints and uncaught exceptions with the line highlighted; Continue ⌃⌘Y, Step Over F6, Into F7, Out F8, Stop ⌘.; the Debug panel shows the call stack (click to switch frames), expandable variables, and a console that evaluates expressions in the selected frame. If debugpy isn't in your interpreter, PyIDE offers to install it into `~/Library/Application Support/PyIDE/debugpy` (your environment is untouched). Breakpoints move with the code as you insert or delete lines; right-click a line number for **conditional breakpoints** (purple). The debugged program runs with its stdin connected to the Debug console: while it runs, what you type goes to `input()`; while paused, it's evaluated in the selected frame.
+- **Debugger** (debugpy over DAP): click a line number (or ⌘\\) to set a breakpoint; **Debug File** (⇧⌘D or the ladybug button) pauses on breakpoints and uncaught exceptions with the line highlighted; Continue ⌃⌘Y, Step Over F6, Into F7, Out F8, Stop ⌘.; the Debug panel shows the call stack (click to switch frames), expandable variables, and a console that evaluates expressions in the selected frame. If debugpy isn't in your interpreter, PyIDE offers to install it into `~/Library/Application Support/PyIDE/debugpy` (your environment is untouched). Breakpoints move with the code as you insert or delete lines; right-click a line number for **conditional breakpoints** (purple) or **logpoints** (teal: print a message like `i = {i}` without pausing). **Watch expressions** in the Debug panel are re-evaluated in the selected frame at every pause. The debugged program runs with its stdin connected to the Debug console: while it runs, what you type goes to `input()`; while paused, it's evaluated in the selected frame.
 - **Jupyter notebooks** (`.ipynb`) open in a read-only rendered view — markdown, highlighted code cells with execution counts, text/image outputs and tracebacks; tick *Show JSON* to edit the raw file (try `Examples/hello/demo.ipynb`)
 - Run the current file (⌘R), test with pytest or `unittest discover` (⌘U), check with `ruff check` / pyright / `compileall` (⌘B), stop (⌘. sends SIGINT)
 - Output panel with a **stdin field** while a program runs, so `input()` works (plus an EOF button)
@@ -62,10 +62,9 @@ You can also open `Package.swift` in Xcode.
 
 ## Roadmap
 
-- Deduplicate problems reported by both pyright and ruff (e.g. undefined names)
 - Jupyter: editing and running cells against a kernel
 - tree-sitter-python for incremental highlighting
-- Debugger: logpoints, hit counts, watch expressions
+- Debugger: hit-count breakpoints, editing variable values
 
 ## License
 

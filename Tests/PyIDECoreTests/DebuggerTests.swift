@@ -187,4 +187,56 @@ final class EventInbox: @unchecked Sendable {
         for _ in 0..<40 where !output.value.contains("Hello Ada!") { try await Task.sleep(for: .milliseconds(25)) }
         #expect(output.value.contains("Name? ") && output.value.contains("Hello Ada!"), "output: \(output.value)")
     }
+
+    /// A logpoint prints (with {expression} interpolation) without pausing; watch evaluation works at a stop.
+    @Test(.enabled(if: canRun), .timeLimit(.minutes(1)))
+    func logpointsAndWatchEvaluation() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pyide-dbg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let program = dir.appendingPathComponent("loop.py")
+        try "total = 0\nfor i in range(3):\n    total += i\nprint('end', total)\n".write(to: program, atomically: true, encoding: .utf8)
+
+        let python = try #require(PythonEnvironment.interpreter(for: nil))
+        let inbox = EventInbox()
+        let client = DAPClient()
+        client.onEvent = { inbox.add($0, $1) }
+        try client.start(executable: python, arguments: ["-m", "debugpy.adapter"],
+                         environment: DebugpyLocator.adapterEnvironment(base: ToolLocator.environment(), useSupportDirectory: true),
+                         currentDirectory: dir)
+        defer { client.terminate() }
+        _ = try await client.request("initialize", arguments: [
+            "clientID": "pyide", "adapterID": "debugpy", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
+        ])
+        let launch = Task {
+            try await client.request("launch", arguments: [
+                "program": .string(program.path), "cwd": .string(dir.path), "python": [.string(python.path)],
+                "console": "internalConsole", "redirectOutput": true, "justMyCode": true,
+            ])
+        }
+        _ = try await inbox.next("initialized")
+        let breakpoints: [SourceBreakpoint] = [
+            SourceBreakpoint(line: 3, spec: BreakpointSpec(logMessage: "i={i} total={total}")),
+            SourceBreakpoint(line: 4, spec: BreakpointSpec(condition: "total == 3")),
+        ]
+        _ = try await client.request("setBreakpoints", arguments: [
+            "source": ["path": .string(program.path)], "breakpoints": .array(breakpoints.map(\.json)),
+        ])
+        _ = try await client.request("configurationDone")
+        _ = try await launch.value
+
+        // The only pause is the conditional breakpoint on line 4; the logpoint fired three times before it.
+        let stopped = try await inbox.next("stopped")
+        let thread = try #require(stopped["threadId"]?.intValue)
+        let frames = StackFrameInfo.parseAll(try await client.request("stackTrace", arguments: ["threadId": .int(thread)]))
+        #expect(frames.first?.line == 4)
+        for _ in 0..<40 where !inbox.output.contains("i=2 total=1") { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(inbox.output.contains("i=0 total=0") && inbox.output.contains("i=1 total=0") && inbox.output.contains("i=2 total=1"),
+                "output: \(inbox.output)")
+        let watched = try await client.request("evaluate", arguments: [
+            "expression": "total * 10", "frameId": .int(frames[0].id), "context": "watch",
+        ])
+        #expect(watched["result"]?.stringValue == "30")
+        _ = try? await client.request("disconnect", arguments: ["terminateDebuggee": true])
+    }
 }

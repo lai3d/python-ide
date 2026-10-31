@@ -1,18 +1,41 @@
 import Foundation
 
+/// What a breakpoint does: pause (optionally only when `condition` is true), or — with a
+/// `logMessage` — print the message (with `{expression}` interpolation) and keep running.
+public struct BreakpointSpec: Sendable, Hashable {
+    public var condition: String
+    public var logMessage: String
+
+    public init(condition: String = "", logMessage: String = "") {
+        self.condition = condition
+        self.logMessage = logMessage
+    }
+
+    public var isLogpoint: Bool { !logMessage.isEmpty }
+    public var isConditional: Bool { !condition.isEmpty }
+}
+
 /// A breakpoint as sent to the debug adapter (1-based line).
 public struct SourceBreakpoint: Sendable, Hashable {
     public let line: Int
     public let condition: String?
+    public let logMessage: String?
 
-    public init(line: Int, condition: String? = nil) {
+    public init(line: Int, condition: String? = nil, logMessage: String? = nil) {
         self.line = line
         self.condition = condition
+        self.logMessage = logMessage
+    }
+
+    public init(line: Int, spec: BreakpointSpec) {
+        self.init(line: line, condition: spec.isConditional ? spec.condition : nil,
+                  logMessage: spec.isLogpoint ? spec.logMessage : nil)
     }
 
     public var json: JSONValue {
         var object: [String: JSONValue] = ["line": .int(line)]
         if let condition, !condition.isEmpty { object["condition"] = .string(condition) }
+        if let logMessage, !logMessage.isEmpty { object["logMessage"] = .string(logMessage) }
         return .object(object)
     }
 }

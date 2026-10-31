@@ -10,7 +10,9 @@ final class LineNumberRuler: NSRulerView {
     private var lineMarkers: [Int: Diagnostic.Severity] = [:]
     private var breakpointLines: Set<Int> = []
     private var conditionalLines: Set<Int> = []
+    private var logpointLines: Set<Int> = []
     var onEditCondition: ((Int) -> Void)?
+    var onEditLogMessage: ((Int) -> Void)?
     var onRemoveBreakpoint: ((Int) -> Void)?
     private var executionLine: Int?
     /// Called with a zero-based line when its number is clicked.
@@ -52,11 +54,12 @@ final class LineNumberRuler: NSRulerView {
         }
     }
 
-    func setDebugState(breakpoints: Set<Int>, conditional: Set<Int>, executionLine: Int?) {
-        guard breakpoints != breakpointLines || conditional != conditionalLines
+    func setDebugState(breakpoints: Set<Int>, conditional: Set<Int>, logpoints: Set<Int>, executionLine: Int?) {
+        guard breakpoints != breakpointLines || conditional != conditionalLines || logpoints != logpointLines
                 || executionLine != self.executionLine else { return }
         breakpointLines = breakpoints
         conditionalLines = conditional
+        logpointLines = logpoints
         self.executionLine = executionLine
         needsDisplay = true
     }
@@ -107,7 +110,8 @@ final class LineNumberRuler: NSRulerView {
                 path.line(to: NSPoint(x: rect.minX, y: rect.minY + 3))
                 path.appendArc(withCenter: NSPoint(x: rect.minX + 3, y: rect.minY + 3), radius: 3, startAngle: 180, endAngle: 270)
                 path.close()
-                (conditionalLines.contains(line) ? NSColor.systemPurple : NSColor.systemBlue).setFill()
+                (logpointLines.contains(line) ? NSColor.systemTeal
+                    : conditionalLines.contains(line) ? NSColor.systemPurple : NSColor.systemBlue).setFill()
                 path.fill()
             }
             if line == executionLine {
@@ -177,10 +181,15 @@ final class LineNumberRuler: NSRulerView {
             menu.addItem(ClosureMenuItem(conditionalLines.contains(line) ? "Edit Condition…" : "Add Condition…") { [weak self] in
                 self?.onEditCondition?(line)
             })
+            menu.addItem(ClosureMenuItem(logpointLines.contains(line) ? "Edit Log Message…" : "Make Logpoint…") { [weak self] in
+                self?.onEditLogMessage?(line)
+            })
+            menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Remove Breakpoint") { [weak self] in self?.onRemoveBreakpoint?(line) })
         } else {
             menu.addItem(ClosureMenuItem("Add Breakpoint") { [weak self] in self?.onToggleBreakpoint?(line) })
             menu.addItem(ClosureMenuItem("Add Conditional Breakpoint…") { [weak self] in self?.onEditCondition?(line) })
+            menu.addItem(ClosureMenuItem("Add Logpoint…") { [weak self] in self?.onEditLogMessage?(line) })
         }
         return menu
     }

@@ -15,6 +15,7 @@ struct EditorServices {
     var quickFix: @MainActor (Int) -> Void = { _ in }
     var applyCodeAction: @MainActor (CodeAction) -> Void = { _ in }
     var editBreakpointCondition: @MainActor (Int) -> Void = { _ in }
+    var editLogMessage: @MainActor (Int) -> Void = { _ in }
     var removeBreakpoint: @MainActor (Int) -> Void = { _ in }
     var caretMoved: @MainActor (NSRange) -> Void
 }
@@ -32,6 +33,7 @@ struct CodeEditorView: NSViewRepresentable {
     var diagnostics: [Diagnostic]
     var breakpointLines: Set<Int> = []
     var conditionalBreakpointLines: Set<Int> = []
+    var logpointLines: Set<Int> = []
     /// Zero-based line where the debugger is paused in this document.
     var executionLine: Int?
     var quickFixMenu: Workspace.QuickFixMenu?
@@ -100,6 +102,7 @@ struct CodeEditorView: NSViewRepresentable {
 
         ruler.onToggleBreakpoint = { [weak coordinator] line in coordinator?.parent.services.toggleBreakpoint(line) }
         ruler.onEditCondition = { [weak coordinator] line in coordinator?.parent.services.editBreakpointCondition(line) }
+        ruler.onEditLogMessage = { [weak coordinator] line in coordinator?.parent.services.editLogMessage(line) }
         ruler.onRemoveBreakpoint = { [weak coordinator] line in coordinator?.parent.services.removeBreakpoint(line) }
         coordinator.textView = textView
         coordinator.ruler = ruler
@@ -134,6 +137,7 @@ struct CodeEditorView: NSViewRepresentable {
         }
 
         coordinator.ruler?.setDebugState(breakpoints: breakpointLines, conditional: conditionalBreakpointLines,
+                                         logpoints: logpointLines,
                                          executionLine: executionLine)
 
         if let reveal, reveal.id != coordinator.lastRevealID {

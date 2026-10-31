@@ -18,6 +18,9 @@ final class DebugSession {
     /// Bumped on every stop so variable trees (whose references are only valid per stop) rebuild.
     private(set) var stopCount = 0
     private(set) var console = ""
+    /// Watch expression → its value in the selected frame (or the error message).
+    private(set) var watchValues: [String: String] = [:]
+    private(set) var watchExpressions: [String] = []
 
     @ObservationIgnored private let client = DAPClient()
     @ObservationIgnored private var threadID: Int?
@@ -156,6 +159,7 @@ final class DebugSession {
     private func control(_ command: String) {
         guard state == .stopped, let threadID else { return }
         state = .running
+        watchValues = [:]
         frames = []
         scopes = []
         onLocation(nil)
@@ -178,9 +182,38 @@ final class DebugSession {
 
     // MARK: Inspection
 
+    func setWatches(_ expressions: [String]) {
+        watchExpressions = expressions
+        refreshWatches()
+    }
+
+    /// Evaluates every watch expression in the selected frame.
+    func refreshWatches() {
+        guard state == .stopped, let frameID = selectedFrameID else {
+            watchValues = [:]
+            return
+        }
+        for expression in watchExpressions {
+            Task {
+                let value: String
+                do {
+                    let body = try await client.request("evaluate", arguments: [
+                        "expression": .string(expression), "frameId": .int(frameID), "context": "watch",
+                    ])
+                    value = body["result"]?.stringValue ?? ""
+                } catch {
+                    value = "⚠︎ " + (error.localizedDescription.components(separatedBy: "failed: ").last ?? "error")
+                }
+                guard selectedFrameID == frameID else { return }
+                watchValues[expression] = value
+            }
+        }
+    }
+
     func select(frame: StackFrameInfo) {
         selectedFrameID = frame.id
         if let path = frame.path { onLocation((path, frame.line)) }
+        refreshWatches()
         Task {
             let body = try? await client.request("scopes", arguments: ["frameId": .int(frame.id)])
             guard selectedFrameID == frame.id else { return }
