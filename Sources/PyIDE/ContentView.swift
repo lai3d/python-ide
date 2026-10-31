@@ -182,7 +182,10 @@ struct EditorArea: View {
                 }
                 EditorHeader()
                 Divider()
-                if workspace.currentFile != nil {
+                if workspace.isNotebook && !workspace.showNotebookJSON {
+                    NotebookView(documentID: workspace.currentDocumentID, version: workspace.currentVersion,
+                                 text: workspace.text)
+                } else if workspace.currentFile != nil {
                     CodeEditorView(
                         documentID: workspace.currentDocumentID,
                         openDocumentIDs: Set(workspace.documents.map(\.id)),
@@ -309,6 +312,13 @@ struct EditorHeader: View {
                 .help("Go Back (⌃⌘←)")
             if let file = workspace.currentFile {
                 Text(relativePath(file)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                if workspace.isNotebook {
+                    @Bindable var workspace = workspace
+                    Toggle("Show JSON", isOn: $workspace.showNotebookJSON)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                        .help("Edit the notebook's raw JSON")
+                }
                 if workspace.isReadOnly {
                     Text("Read Only")
                         .font(.caption2.weight(.semibold))

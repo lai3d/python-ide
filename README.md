@@ -25,6 +25,7 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
 - **Interpreter detection**: uses the project's `.venv` / `venv` / `env` if present, else `$VIRTUAL_ENV`, else `python3`; pick another from the status bar or *Python → Choose Interpreter…*. The interpreter is passed to pyright, so imports from your venv resolve.
 - **REPL panel** (⌃⌘P): an interactive `python -i` in the project folder with the project interpreter; ↑/↓ history, interrupt, restart, clear. **Send Selection to REPL** (⌃↩) sends the selected code, or the caret's line, with indentation and block endings fixed up
 - **Debugger** (debugpy over DAP): click a line number (or ⌘\\) to set a breakpoint; **Debug File** (⇧⌘D or the ladybug button) pauses on breakpoints and uncaught exceptions with the line highlighted; Continue ⌃⌘Y, Step Over F6, Into F7, Out F8, Stop ⌘.; the Debug panel shows the call stack (click to switch frames), expandable variables, and a console that evaluates expressions in the selected frame. If debugpy isn't in your interpreter, PyIDE offers to install it into `~/Library/Application Support/PyIDE/debugpy` (your environment is untouched). Breakpoints move with the code as you insert or delete lines; right-click a line number for **conditional breakpoints** (purple). The debugged program runs with its stdin connected to the Debug console: while it runs, what you type goes to `input()`; while paused, it's evaluated in the selected frame.
+- **Jupyter notebooks** (`.ipynb`) open in a read-only rendered view — markdown, highlighted code cells with execution counts, text/image outputs and tracebacks; tick *Show JSON* to edit the raw file (try `Examples/hello/demo.ipynb`)
 - Run the current file (⌘R), test with pytest or `unittest discover` (⌘U), check with `ruff check` / pyright / `compileall` (⌘B), stop (⌘. sends SIGINT)
 - Output panel with a **stdin field** while a program runs, so `input()` works (plus an EOF button)
 
@@ -61,7 +62,7 @@ You can also open `Package.swift` in Xcode.
 ## Roadmap
 
 - Per-diagnostic quick fixes (lightbulb) via `ruff server`
-- Jupyter notebook viewing
+- Jupyter: editing and running cells against a kernel
 - tree-sitter-python for incremental highlighting
 - Debugger: logpoints, hit counts, watch expressions
 

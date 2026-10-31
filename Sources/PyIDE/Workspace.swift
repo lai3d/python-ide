@@ -122,6 +122,10 @@ final class Workspace {
     }
 
     var text: String { currentIndex.map { documents[$0].text } ?? "" }
+    var currentVersion: Int { currentIndex.map { documents[$0].version } ?? 0 }
+    var isNotebook: Bool { currentFile?.pathExtension == "ipynb" }
+    /// Show a notebook's raw JSON in the text editor instead of the rendered view.
+    var showNotebookJSON = false
     var isDirty: Bool { currentIndex.map { documents[$0].isDirty } ?? false }
     var hasUnsavedChanges: Bool { documents.contains { $0.isDirty } }
     var currentDocumentID: String { currentFile.map(Self.key(for:)) ?? "" }
