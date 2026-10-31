@@ -118,3 +118,34 @@ public extension Identifier {
 extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
+
+// MARK: - Code actions
+
+/// A quick fix or source action offered by a language server.
+public struct CodeAction: Sendable, Hashable, Identifiable {
+    public let id = UUID()
+    public let title: String
+    public let kind: String?
+    public let isPreferred: Bool
+    /// Edits per document URI; nil if the server sent no edit (resolve it first).
+    public let edit: [String: [TextEdit]]?
+    /// The original object, for `codeAction/resolve`.
+    public let raw: JSONValue
+
+    public var isQuickFix: Bool { kind == nil || kind!.hasPrefix("quickfix") }
+
+    public static func parseAll(_ result: JSONValue) -> [CodeAction] {
+        (result.arrayValue ?? []).compactMap(parse)
+    }
+
+    public static func parse(_ value: JSONValue) -> CodeAction? {
+        // Bare `Command` objects (no edit, server-side execution) aren't supported.
+        guard let title = value["title"]?.stringValue, value["command"]?.stringValue == nil else { return nil }
+        return CodeAction(title: title, kind: value["kind"]?.stringValue,
+                          isPreferred: value["isPreferred"]?.boolValue ?? false,
+                          edit: value["edit"].map(WorkspaceEdit.parse), raw: value)
+    }
+
+    public static func == (a: CodeAction, b: CodeAction) -> Bool { a.id == b.id }
+    public func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}

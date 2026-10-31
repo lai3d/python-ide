@@ -69,7 +69,25 @@ final class Workspace {
     private(set) var outline: [OutlineSymbol] = []
     @ObservationIgnored private var outlineTask: Task<Void, Never>?
     @ObservationIgnored private var fileWatcher: FileWatcher?
-    private(set) var diagnostics: [String: [Diagnostic]] = [:]  // keyed by normalized path
+    /// Diagnostics per server ("pyright", "ruff"), then per normalized path.
+    private(set) var serverDiagnostics: [String: [String: [Diagnostic]]] = [:]
+
+    /// All servers' diagnostics per normalized path, in position order.
+    var diagnostics: [String: [Diagnostic]] {
+        var merged: [String: [Diagnostic]] = [:]
+        for byPath in serverDiagnostics.values {
+            for (path, list) in byPath { merged[path, default: []] += list }
+        }
+        return merged.mapValues { $0.sorted { ($0.start.line, $0.start.character) < ($1.start.line, $1.start.character) } }
+    }
+
+    /// A quick-fix menu for the editor to pop up at the caret.
+    struct QuickFixMenu: Equatable {
+        let id = UUID()
+        let offset: Int
+        let actions: [CodeAction]
+    }
+    var quickFixMenu: QuickFixMenu?
     private(set) var lspStatus = "Language server: not started"
     private(set) var interpreter: URL?
     private(set) var output = ""
@@ -100,13 +118,23 @@ final class Workspace {
     @ObservationIgnored private var lsp: LSPClient?
     @ObservationIgnored private var lspName = "Language server"
     @ObservationIgnored private var lspReady = false
+    /// `ruff server`: lint diagnostics and quick fixes, alongside the main server.
+    @ObservationIgnored private var ruff: LSPClient?
+    @ObservationIgnored private var ruffReady = false
+
+    /// Servers that should see document open/change/save/close.
+    private var syncedServers: [LSPClient] {
+        [lspReady ? lsp : nil, ruffReady ? ruff : nil].compactMap { $0 }
+    }
     @ObservationIgnored private var runProcess: Process?
     @ObservationIgnored private var runInput: FileHandle?
     @ObservationIgnored private var handledLaunchArguments = false
 
     var currentDiagnostics: [Diagnostic] {
         guard let currentFile else { return [] }
-        return diagnostics[Self.key(for: currentFile)] ?? []
+        let key = Self.key(for: currentFile)
+        return serverDiagnostics.values.flatMap { $0[key] ?? [] }
+            .sorted { ($0.start.line, $0.start.character) < ($1.start.line, $1.start.character) }
     }
 
     var allProblems: [ProblemItem] {
@@ -196,7 +224,7 @@ final class Workspace {
         interpreter = PythonEnvironment.interpreter(for: url)
         currentFile = nil
         documents = []
-        diagnostics = [:]
+        serverDiagnostics = [:]
         output = ""
         backStack = []
         let preferred = ["main.py", "__main__.py", "app.py"].lazy.compactMap { Self.firstFile(named: $0, in: self.fileTree) }.first
@@ -270,7 +298,7 @@ final class Workspace {
         guard confirmDiscardOrSave([documents[index]]) else { return }
         let closing = documents.remove(at: index)
         sendDidClose(closing)
-        diagnostics.removeValue(forKey: closing.id)  // re-published if the file is reopened
+        for server in serverDiagnostics.keys { serverDiagnostics[server]?.removeValue(forKey: closing.id) }
         if currentFile.map(Self.key(for:)) == closing.id {
             currentFile = documents.isEmpty ? nil : documents[min(index, documents.count - 1)].url
         }
@@ -304,11 +332,11 @@ final class Workspace {
         documents[index].text = newText
         documents[index].isDirty = true
         documents[index].version += 1
-        guard lspReady, Self.isPython(documents[index].url) else { return }
-        try? lsp?.notify("textDocument/didChange", params: [
+        guard Self.isPython(documents[index].url) else { return }
+        for server in syncedServers { try? server.notify("textDocument/didChange", params: [
             "textDocument": ["uri": .string(documents[index].url.absoluteString), "version": .int(documents[index].version)],
             "contentChanges": [["text": .string(newText)]],
-        ])
+        ]) }
         if documents[index].id == currentDocumentID { scheduleOutlineRefresh(after: .milliseconds(500)) }
     }
 
@@ -381,8 +409,10 @@ final class Workspace {
         do {
             try document.text.write(to: document.url, atomically: true, encoding: .utf8)
             documents[index].isDirty = false
-            if lspReady, Self.isPython(document.url) {
-                try? lsp?.notify("textDocument/didSave", params: ["textDocument": ["uri": .string(document.url.absoluteString)]])
+            if Self.isPython(document.url) {
+                for server in syncedServers {
+                    try? server.notify("textDocument/didSave", params: ["textDocument": ["uri": .string(document.url.absoluteString)]])
+                }
             }
             return true
         } catch {
@@ -547,25 +577,7 @@ final class Workspace {
             flashStatus("Rename failed: \(error.localizedDescription)")
             return
         }
-        let changes = WorkspaceEdit.parse(result)
-        var occurrences = 0, files = 0
-        for (uri, edits) in changes.sorted(by: { $0.key < $1.key }) {
-            guard let parsed = URL(string: uri), parsed.isFileURL else { continue }
-            let url = URL(fileURLWithPath: parsed.path)
-            guard !isReadOnly(url) else { continue }
-            let key = Self.key(for: url)
-            if let index = documents.firstIndex(where: { $0.id == key }) {
-                setText(TextEdit.apply(edits, to: documents[index].text), at: index)
-            } else {
-                guard let original = try? String(contentsOf: url, encoding: .utf8) else { continue }
-                var document = OpenDocument(url: url, text: TextEdit.apply(edits, to: original))
-                document.isDirty = true
-                documents.append(document)
-                sendDidOpen(document)
-            }
-            occurrences += edits.count
-            files += 1
-        }
+        let (occurrences, files) = applyWorkspaceEdit(WorkspaceEdit.parse(result))
         flashStatus(files == 0 ? "Nothing to rename"
                     : "Renamed \(occurrences) occurrence\(occurrences == 1 ? "" : "s") in \(files) file\(files == 1 ? "" : "s") — ⌥⌘S to save")
     }
@@ -623,6 +635,144 @@ final class Workspace {
     }
 
     private func startLanguageServer(root: URL) async {
+        async let ruffStarted: Void = startRuffServer(root: root)
+        await startMainLanguageServer(root: root)
+        await ruffStarted
+    }
+
+    /// Starts `ruff server` if ruff is installed (in the interpreter's environment or on PATH).
+    private func startRuffServer(root: URL) async {
+        guard let executable = ToolLocator.find("ruff", in: PythonEnvironment.toolDirectories(for: interpreter)) else { return }
+        let client = LSPClient()
+        client.onNotification = { method, params in
+            Task { @MainActor in
+                guard self.ruff === client, method == "textDocument/publishDiagnostics" else { return }
+                self.storeDiagnostics(params, server: "ruff")
+            }
+        }
+        client.onExit = { _ in
+            Task { @MainActor in
+                guard self.ruff === client else { return }
+                self.ruff = nil
+                self.ruffReady = false
+                self.serverDiagnostics["ruff"] = nil
+            }
+        }
+        do {
+            try client.start(executable: executable, arguments: ["server"],
+                             environment: ToolLocator.environment(interpreter: interpreter), currentDirectory: root)
+            ruff = client
+            _ = try await client.request("initialize", params: [
+                "processId": .int(Int(ProcessInfo.processInfo.processIdentifier)),
+                "clientInfo": ["name": "PyIDE"],
+                "rootUri": .string(root.absoluteString),
+                "workspaceFolders": [["uri": .string(root.absoluteString), "name": .string(root.lastPathComponent)]],
+                "capabilities": [
+                    "textDocument": [
+                        "synchronization": ["didSave": true],
+                        "publishDiagnostics": [:],
+                        "codeAction": ["codeActionLiteralSupport": ["codeActionKind": ["valueSet": ["quickfix", "source"]]]],
+                    ],
+                    "general": ["positionEncodings": ["utf-16"]],
+                ],
+            ])
+            guard ruff === client else { return }
+            try client.notify("initialized", params: [:])
+            ruffReady = true
+            for document in documents { sendDidOpen(document, to: client) }
+        } catch {
+            if ruff === client { ruff = nil }
+        }
+    }
+
+    private func storeDiagnostics(_ params: JSONValue, server: String) {
+        guard let published = Diagnostic.parsePublish(params), let url = URL(string: published.uri) else { return }
+        let key = Self.key(for: url)
+        // Hints ("x is not accessed") are too noisy for the Problems list.
+        let shown = published.diagnostics.filter { $0.severity != .hint }
+        if shown.isEmpty {
+            serverDiagnostics[server]?.removeValue(forKey: key)
+        } else {
+            serverDiagnostics[server, default: [:]][key] = shown
+        }
+    }
+
+    // MARK: - Quick fixes
+
+    /// Asks every server for code actions at `offset` and shows them as a menu at the caret.
+    func showQuickFixes(at offset: Int) async {
+        guard isPythonFile, let url = currentFile else { return }
+        let position = LineIndex(text).position(of: offset)
+        let line = position.line
+        let lineDiagnostics = currentDiagnostics.filter { $0.start.line <= line && line <= $0.end.line }
+        var actions: [CodeAction] = []
+        for (server, diagnosticSource) in [(lsp, "pyright"), (ruff, "ruff")] {
+            guard let server, server === lsp ? lspReady : ruffReady else { continue }
+            let own = lineDiagnostics.filter { (serverDiagnostics[diagnosticSource]?[Self.key(for: url)] ?? []).contains($0) }
+            let range: JSONValue = own.isEmpty
+                ? ["start": position.json, "end": position.json]
+                : ["start": own.map(\.start).min { ($0.line, $0.character) < ($1.line, $1.character) }!.json,
+                   "end": own.map(\.end).max { ($0.line, $0.character) < ($1.line, $1.character) }!.json]
+            let params: JSONValue = [
+                "textDocument": ["uri": .string(url.absoluteString)],
+                "range": range,
+                "context": ["diagnostics": .array(own.compactMap(\.raw))],
+            ]
+            if let result = try? await server.request("textDocument/codeAction", params: params) {
+                actions += CodeAction.parseAll(result)
+            }
+        }
+        // Quick fixes first (preferred on top), then source actions like "Fix all".
+        actions.sort { a, b in
+            if a.isQuickFix != b.isQuickFix { return a.isQuickFix }
+            return a.isPreferred && !b.isPreferred
+        }
+        guard !actions.isEmpty else {
+            flashStatus("No quick fixes here")
+            return
+        }
+        quickFixMenu = QuickFixMenu(offset: offset, actions: actions)
+    }
+
+    func apply(_ action: CodeAction) async {
+        var edit = action.edit
+        if edit == nil, let ruff, ruffReady,
+           let resolved = try? await ruff.request("codeAction/resolve", params: action.raw) {
+            edit = resolved["edit"].map(WorkspaceEdit.parse)
+        }
+        guard let edit, !edit.isEmpty else {
+            flashStatus("This action can't be applied")
+            return
+        }
+        let (_, files) = applyWorkspaceEdit(edit)
+        if files > 1 { flashStatus("Changed \(files) files — ⌥⌘S to save") }
+    }
+
+    /// Applies edits to open documents (undoable) and opens other changed files as unsaved tabs.
+    @discardableResult
+    private func applyWorkspaceEdit(_ changes: [String: [TextEdit]]) -> (occurrences: Int, files: Int) {
+        var occurrences = 0, files = 0
+        for (uri, edits) in changes.sorted(by: { $0.key < $1.key }) {
+            guard let parsed = URL(string: uri), parsed.isFileURL else { continue }
+            let url = URL(fileURLWithPath: parsed.path)
+            guard !isReadOnly(url) else { continue }
+            let key = Self.key(for: url)
+            if let index = documents.firstIndex(where: { $0.id == key }) {
+                setText(TextEdit.apply(edits, to: documents[index].text), at: index)
+            } else {
+                guard let original = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                var document = OpenDocument(url: url, text: TextEdit.apply(edits, to: original))
+                document.isDirty = true
+                documents.append(document)
+                sendDidOpen(document)
+            }
+            occurrences += edits.count
+            files += 1
+        }
+        return (occurrences, files)
+    }
+
+    private func startMainLanguageServer(root: URL) async {
         guard let (spec, executable) = LanguageServerSpec.locate(interpreter: interpreter) else {
             lspStatus = "No Python language server — \(LanguageServerSpec.installHint)"
             return
@@ -657,7 +807,7 @@ final class Workspace {
             lspReady = true
             lspStatus = "\(spec.name): ready"
             scheduleOutlineRefresh(after: .zero)
-            documents.forEach(sendDidOpen)
+            for document in documents { sendDidOpen(document, to: client) }
         } catch {
             if lsp === client { lsp = nil }
             lspStatus = "\(spec.name) failed: \(error.localizedDescription)"
@@ -665,6 +815,14 @@ final class Workspace {
     }
 
     private func stopLanguageServer() async {
+        if let ruffClient = ruff {
+            ruff = nil
+            ruffReady = false
+            ruffClient.onNotification = nil
+            ruffClient.onExit = nil
+            serverDiagnostics["ruff"] = nil
+            Task { await ruffClient.shutdown() }
+        }
         guard let client = lsp else { return }
         lsp = nil
         lspReady = false
@@ -678,15 +836,7 @@ final class Workspace {
         guard lsp === client else { return }
         switch method {
         case "textDocument/publishDiagnostics":
-            guard let published = Diagnostic.parsePublish(params), let url = URL(string: published.uri) else { return }
-            let key = Self.key(for: url)
-            // Hints ("x is not accessed") are too noisy for the Problems list.
-            let shown = published.diagnostics.filter { $0.severity != .hint }
-            if shown.isEmpty {
-                diagnostics.removeValue(forKey: key)
-            } else {
-                diagnostics[key] = shown
-            }
+            storeDiagnostics(params, server: "pyright")
         case "window/showMessage":
             if let message = params["message"]?.stringValue { lspStatus = "\(lspName): \(message)" }
         default:
@@ -695,8 +845,12 @@ final class Workspace {
     }
 
     private func sendDidOpen(_ document: OpenDocument) {
-        guard lspReady, Self.isPython(document.url) else { return }
-        try? lsp?.notify("textDocument/didOpen", params: [
+        for server in syncedServers { sendDidOpen(document, to: server) }
+    }
+
+    private func sendDidOpen(_ document: OpenDocument, to server: LSPClient) {
+        guard Self.isPython(document.url) else { return }
+        try? server.notify("textDocument/didOpen", params: [
             "textDocument": [
                 "uri": .string(document.url.absoluteString),
                 "languageId": "python",
@@ -707,8 +861,10 @@ final class Workspace {
     }
 
     private func sendDidClose(_ document: OpenDocument) {
-        guard lspReady, Self.isPython(document.url) else { return }
-        try? lsp?.notify("textDocument/didClose", params: ["textDocument": ["uri": .string(document.url.absoluteString)]])
+        guard Self.isPython(document.url) else { return }
+        for server in syncedServers {
+            try? server.notify("textDocument/didClose", params: ["textDocument": ["uri": .string(document.url.absoluteString)]])
+        }
     }
 
     private static func initializeParams(root: URL) -> JSONValue {
@@ -721,6 +877,7 @@ final class Workspace {
             "hover": ["contentFormat": ["markdown", "plaintext"]],
             "definition": ["linkSupport": false],
             "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
+            "codeAction": ["codeActionLiteralSupport": ["codeActionKind": ["valueSet": ["quickfix", "source"]]]],
             "references": [:],
             "rename": ["prepareSupport": true],
             "signatureHelp": [

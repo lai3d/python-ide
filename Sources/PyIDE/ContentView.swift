@@ -196,6 +196,7 @@ struct EditorArea: View {
                         breakpointLines: workspace.currentBreakpoints,
                         conditionalBreakpointLines: workspace.currentConditionalBreakpoints,
                         executionLine: workspace.currentExecutionLine,
+                        quickFixMenu: workspace.quickFixMenu,
                         reveal: workspace.revealTarget,
                         services: EditorServices(
                             completions: { await workspace.completions(at: $0) },
@@ -205,6 +206,8 @@ struct EditorArea: View {
                             references: { offset in Task { await workspace.findReferences(at: offset) } },
                             rename: { offset in Task { await workspace.renameSymbol(at: offset) } },
                             toggleBreakpoint: { workspace.toggleBreakpoint(line: $0) },
+                            quickFix: { offset in Task { await workspace.showQuickFixes(at: offset) } },
+                            applyCodeAction: { action in Task { await workspace.apply(action) } },
                             editBreakpointCondition: { workspace.editBreakpointCondition(line: $0) },
                             removeBreakpoint: { workspace.removeBreakpoint(line: $0) },
                             caretMoved: {
@@ -405,7 +408,14 @@ struct ProblemsList: View {
                         Text("\(item.fileName):\(item.diagnostic.start.line + 1):\(item.diagnostic.start.character + 1)")
                             .font(.system(.body, design: .monospaced))
                             .foregroundStyle(.secondary)
-                        Text(item.diagnostic.message)
+                        if let code = item.diagnostic.code {
+                            Text(code)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                        }
+                        Text(item.diagnostic.summary)
                             .lineLimit(2)
                         Spacer()
                     }

@@ -20,6 +20,7 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
   - **signature help** while typing a call: pops up on `(` / `,` with the current parameter highlighted; Esc dismisses
   - **find references** (⌥⌘R or right-click): results in a References panel, click to jump
   - **rename symbol** (⌃⌘E or right-click) across the project; changed files open as unsaved tabs so nothing is written until you save
+- **ruff language server** (`ruff server`, started automatically when ruff is installed) alongside pyright: lint diagnostics with rule codes in the Problems panel, and **per-problem quick fixes** — ⌥↩ (or right-click → *Quick Fix…*) on a line lists fixes such as "Remove unused import", "Disable for this line", then *Fix all* / *Organize imports*
 - **Quick fixes with ruff**: *Fix All* (⇧⌥⌘F) applies every safe autofix from your ruff config (unused imports, pyupgrade, …) and *Organize Imports* (⇧⌥O) sorts imports — both as a single undoable edit
 - **Format on save** with ruff (or black), on by default and toggled in the *Python* menu; *Format Document* with ⇧⌥F. Formatting is a single undoable edit that keeps the caret's line/column; formatter errors (e.g. a syntax error) show in the status bar and the file is saved unformatted.
 - **Interpreter detection**: uses the project's `.venv` / `venv` / `env` if present, else `$VIRTUAL_ENV`, else `python3`; pick another from the status bar or *Python → Choose Interpreter…*. The interpreter is passed to pyright, so imports from your venv resolve.
@@ -61,7 +62,7 @@ You can also open `Package.swift` in Xcode.
 
 ## Roadmap
 
-- Per-diagnostic quick fixes (lightbulb) via `ruff server`
+- Deduplicate problems reported by both pyright and ruff (e.g. undefined names)
 - Jupyter: editing and running cells against a kernel
 - tree-sitter-python for incremental highlighting
 - Debugger: logpoints, hit counts, watch expressions

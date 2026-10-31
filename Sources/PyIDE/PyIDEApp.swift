@@ -55,6 +55,11 @@ struct PyIDEApp: App {
                 }
                 .keyboardShortcut("j", modifiers: [.control, .command])
                 .disabled(!workspace.isPythonFile)
+                Button("Show Quick Fixes") {
+                    Task { await workspace.showQuickFixes(at: workspace.caretOffset) }
+                }
+                .keyboardShortcut(.return, modifiers: [.option])
+                .disabled(!workspace.isPythonFile || workspace.isReadOnly)
                 Button("Find References") {
                     Task { await workspace.findReferences(at: workspace.caretOffset) }
                 }

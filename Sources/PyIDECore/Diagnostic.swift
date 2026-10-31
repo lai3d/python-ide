@@ -12,14 +12,26 @@ public struct Diagnostic: Sendable, Hashable, Identifiable {
     public let severity: Severity
     public let message: String
     public let source: String?
+    /// Rule code, e.g. "F401" (ruff) or "reportUndefinedVariable" (pyright).
+    public let code: String?
+    /// The original LSP object, sent back in `codeAction` requests (ruff keeps its fix there).
+    public let raw: JSONValue?
 
-    public init(start: TextPosition, end: TextPosition, severity: Severity, message: String, source: String? = nil) {
+    public init(start: TextPosition, end: TextPosition, severity: Severity, message: String, source: String? = nil,
+                code: String? = nil, raw: JSONValue? = nil) {
         self.id = UUID()
         self.start = start
         self.end = end
         self.severity = severity
         self.message = message
         self.source = source
+        self.code = code
+        self.raw = raw
+    }
+
+    /// The message's first line (ruff appends "help: …" after a blank line).
+    public var summary: String {
+        message.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? message
     }
 
     /// Parses one LSP `Diagnostic` object.
@@ -30,8 +42,9 @@ public struct Diagnostic: Sendable, Hashable, Identifiable {
               let message = value["message"]?.stringValue
         else { return nil }
         let severity = Severity(rawValue: value["severity"]?.intValue ?? 1) ?? .error
+        let code = value["code"]?.stringValue ?? value["code"]?.intValue.map(String.init)
         return Diagnostic(start: start, end: end, severity: severity, message: message,
-                          source: value["source"]?.stringValue)
+                          source: value["source"]?.stringValue, code: code, raw: value)
     }
 
     /// Parses `textDocument/publishDiagnostics` params.

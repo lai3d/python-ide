@@ -12,6 +12,8 @@ struct EditorServices {
     var rename: @MainActor (Int) -> Void
     /// Zero-based line clicked in the gutter.
     var toggleBreakpoint: @MainActor (Int) -> Void
+    var quickFix: @MainActor (Int) -> Void = { _ in }
+    var applyCodeAction: @MainActor (CodeAction) -> Void = { _ in }
     var editBreakpointCondition: @MainActor (Int) -> Void = { _ in }
     var removeBreakpoint: @MainActor (Int) -> Void = { _ in }
     var caretMoved: @MainActor (NSRange) -> Void
@@ -32,6 +34,7 @@ struct CodeEditorView: NSViewRepresentable {
     var conditionalBreakpointLines: Set<Int> = []
     /// Zero-based line where the debugger is paused in this document.
     var executionLine: Int?
+    var quickFixMenu: Workspace.QuickFixMenu?
     var reveal: RevealTarget?
     var services: EditorServices
     var onChange: (String) -> Void
@@ -125,6 +128,11 @@ struct CodeEditorView: NSViewRepresentable {
             coordinator.applyStyling()
         }
 
+        if let menu = quickFixMenu, menu.id != coordinator.lastQuickFixID {
+            coordinator.lastQuickFixID = menu.id
+            coordinator.showQuickFixMenu(menu)
+        }
+
         coordinator.ruler?.setDebugState(breakpoints: breakpointLines, conditional: conditionalBreakpointLines,
                                          executionLine: executionLine)
 
@@ -152,6 +160,29 @@ struct CodeEditorView: NSViewRepresentable {
         var appliedDiagnostics: [Diagnostic] = []
         var appliedHighlightCode = false
         var appliedExecutionLine: Int?
+        var lastQuickFixID: UUID?
+
+        /// Pops up the code actions just below the caret line.
+        func showQuickFixMenu(_ quickFix: Workspace.QuickFixMenu) {
+            guard let textView else { return }
+            dismissPopups()
+            let menu = NSMenu()
+            var lastWasQuickFix = quickFix.actions.first?.isQuickFix ?? true
+            for action in quickFix.actions {
+                if action.isQuickFix != lastWasQuickFix { menu.addItem(.separator()) }
+                lastWasQuickFix = action.isQuickFix
+                let item = ClosureMenuItem(action.title) { [weak self] in self?.parent.services.applyCodeAction(action) }
+                if action.isPreferred { item.image = NSImage(systemSymbolName: "star.fill", accessibilityDescription: "preferred") }
+                menu.addItem(item)
+            }
+            let length = (textView.string as NSString).length
+            let range = NSRange(location: min(quickFix.offset, length), length: 0)
+            guard let window = textView.window else { return }
+            let screenRect = textView.firstRect(forCharacterRange: range, actualRange: nil)
+            let windowRect = window.convertFromScreen(screenRect)
+            let point = textView.convert(NSPoint(x: windowRect.minX, y: windowRect.minY), from: nil)
+            menu.popUp(positioning: nil, at: point, in: textView)
+        }
         var lastRevealID: UUID?
         weak var ruler: LineNumberRuler?
         var documentID = ""
@@ -622,7 +653,7 @@ struct CodeEditorView: NSViewRepresentable {
             // Act on the clicked word, not wherever the caret was.
             let index = (view as? CodeTextView)?.characterIndex(atWindowPoint: event.locationInWindow) ?? charIndex
             if view.selectedRange().length == 0 { view.setSelectedRange(NSRange(location: index, length: 0)) }
-            let items: [(String, Selector)] = [
+            let items: [(String, Selector)] = (view.isEditable ? [("Quick Fix…", #selector(menuQuickFix(_:)))] : []) + [
                 ("Go to Definition", #selector(menuDefinition(_:))),
                 ("Find References", #selector(menuReferences(_:))),
             ] + (view.isEditable ? [("Rename Symbol…", #selector(menuRename(_:)))] : [])
@@ -636,6 +667,7 @@ struct CodeEditorView: NSViewRepresentable {
             return menu
         }
 
+        @objc private func menuQuickFix(_ sender: NSMenuItem) { parent.services.quickFix(sender.tag) }
         @objc private func menuDefinition(_ sender: NSMenuItem) { parent.services.definition(sender.tag) }
         @objc private func menuReferences(_ sender: NSMenuItem) { parent.services.references(sender.tag) }
         @objc private func menuRename(_ sender: NSMenuItem) { parent.services.rename(sender.tag) }
