@@ -50,8 +50,7 @@ import Testing
         let key = Workspace.key(for: program)
         let session = DebugSession(breakpoints: [key: [SourceBreakpoint(line: 10)]],
                                    target: .connect(host: "127.0.0.1", port: port))
-        // The listener needs a moment to open its port.
-        try await Task.sleep(for: .milliseconds(800))
+        // No delay needed: the session retries while the listener starts.
         session.start(python: python, cwd: dir, environment: ProcessInfo.processInfo.environment,
                       useSupportDirectory: true)
         defer { session.stop() }
@@ -92,7 +91,6 @@ import Testing
         defer { if debuggee.isRunning { debuggee.terminate() } }
 
         let session = DebugSession(breakpoints: [:], target: .connect(host: "127.0.0.1", port: port))
-        try await Task.sleep(for: .milliseconds(800))
         session.start(python: python, cwd: nil, environment: ProcessInfo.processInfo.environment,
                       useSupportDirectory: true)
         try await waitUntil { session.state == .running }

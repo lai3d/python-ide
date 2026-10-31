@@ -107,7 +107,18 @@ final class DebugSession {
                 if case .connect(let host, let port) = target {
                     log("Connecting to \(host):\(port)…\n")
                     let client = self.client
-                    try await Task.detached { try client.connect(host: host, port: port) }.value
+                    // Retry briefly: the program may still be starting its listener.
+                    var attempt = 0
+                    while true {
+                        do {
+                            try await Task.detached { try client.connect(host: host, port: port) }.value
+                            break
+                        } catch {
+                            attempt += 1
+                            guard attempt < 25, state == .starting else { throw error }
+                            try await Task.sleep(for: .milliseconds(200))
+                        }
+                    }
                 }
                 _ = try await client.request("initialize", arguments: [
                     "clientID": "pyide", "clientName": "PyIDE", "adapterID": "debugpy",
