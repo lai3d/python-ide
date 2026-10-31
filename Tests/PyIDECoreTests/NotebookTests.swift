@@ -45,4 +45,14 @@ import Testing
         #expect(throws: Notebook.ParseError.self) { try Notebook.parse("{\"a\": 1}") }
         #expect(throws: Notebook.ParseError.self) { try Notebook.parse("not json") }
     }
+
+    @Test func prefersRichestOutput() {
+        func output(_ data: JSONValue) -> Notebook.Output? {
+            Notebook.parseOutput(["output_type": "execute_result", "data": data])
+        }
+        #expect(output(["text/plain": "df", "text/html": ["<table>", "</table>"]]) == .web("<table></table>", kind: "text/html"))
+        #expect(output(["text/plain": "m", "text/markdown": "**b**"]) == .markdown("**b**"))
+        #expect(output(["text/plain": "x", "text/latex": "$x$"]) == .web("$x$", kind: "text/latex"))
+        #expect(output(["text/plain": "plain"]) == .text("plain", isError: false))
+    }
 }

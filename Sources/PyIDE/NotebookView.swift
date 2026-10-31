@@ -256,6 +256,11 @@ struct NotebookOutputView: View {
                     .frame(maxWidth: min(image.size.width, 800), alignment: .leading)
                     .padding(.horizontal, 8)
             }
+        case .web(let content, let kind):
+            RichOutputView(content: content, kind: kind)
+        case .markdown(let source):
+            MarkdownCell(source: source)
+                .padding(.horizontal, 8)
         case .error(let name, let value, let traceback):
             VStack(alignment: .leading, spacing: 4) {
                 Text("\(name): \(value)").font(.system(size: 12, weight: .semibold, design: .monospaced))

@@ -186,6 +186,62 @@ public final class NotebookKernel: @unchecked Sendable {
     builtins.input = _input
     _ns = {"__name__": "__main__", "__builtins__": builtins}
 
+    # Rich output: the IPython display protocol (_repr_html_, _repr_mimebundle_, …).
+    _REPRS = [("text/html", "_repr_html_"), ("text/markdown", "_repr_markdown_"),
+              ("text/latex", "_repr_latex_"), ("image/svg+xml", "_repr_svg_"),
+              ("image/png", "_repr_png_"), ("image/jpeg", "_repr_jpeg_")]
+
+    def _call_repr(value, name, **kwargs):
+        if isinstance(value, type):
+            return None  # a class, not an instance: its _repr_*_ are unbound
+        try:
+            method = getattr(value, name, None)
+            result = method(**kwargs) if callable(method) else None
+        except Exception:
+            return None
+        return result[0] if isinstance(result, tuple) and result else result
+
+    def _mimebundle(value):
+        data = {}
+        bundle = _call_repr(value, "_repr_mimebundle_", include=None, exclude=None)
+        if isinstance(bundle, dict):
+            data.update({k: v for k, v in bundle.items() if isinstance(v, str) and k in dict(_REPRS)})
+        for mime, name in _REPRS:
+            if mime in data:
+                continue
+            result = _call_repr(value, name)
+            if isinstance(result, bytes) and mime.startswith("image/") and mime != "image/svg+xml":
+                result = base64.b64encode(result).decode("ascii")
+            elif isinstance(result, bytes):
+                result = result.decode("utf-8", "replace")
+            if isinstance(result, str):
+                data[mime] = result
+        try:
+            data["text/plain"] = repr(value)
+        except Exception as error:
+            data["text/plain"] = "<repr failed: %s>" % type(error).__name__
+        return data
+
+    def _display(*objs, raw=False, **kwargs):
+        for obj in objs:
+            data = obj if raw and isinstance(obj, dict) else _mimebundle(obj)
+            _output({"output_type": "display_data", "metadata": {}, "data": data})
+
+    builtins.display = _display
+    _real_import = builtins.__import__
+
+    def _import(name, *args, **kwargs):
+        module = _real_import(name, *args, **kwargs)
+        # Outside an IPython shell, IPython's display() just prints; route it here instead.
+        if name.startswith("IPython"):
+            for module_name in ("IPython.display", "IPython.core.display_functions", "IPython.core.display"):
+                target = sys.modules.get(module_name)
+                if target is not None and hasattr(target, "display"):
+                    target.display = _display
+        return module
+
+    builtins.__import__ = _import
+
     def _show_figures():
         plt = sys.modules.get("matplotlib.pyplot")
         if plt is None:
@@ -210,7 +266,7 @@ public final class NotebookKernel: @unchecked Sendable {
             if value is not None:
                 _ns["_"] = value
                 _output({"output_type": "execute_result", "execution_count": _count[0], "metadata": {},
-                         "data": {"text/plain": repr(value)}})
+                         "data": _mimebundle(value)})
 
     while True:
         try:

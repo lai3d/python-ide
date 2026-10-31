@@ -14,6 +14,9 @@ public struct Notebook: Sendable, Hashable {
     public enum Output: Sendable, Hashable {
         case text(String, isError: Bool)
         case image(Data)
+        /// HTML, LaTeX or SVG, rendered in a web view; `kind` is the MIME type.
+        case web(String, kind: String)
+        case markdown(String)
         case error(name: String, value: String, traceback: String)
     }
 
@@ -62,6 +65,12 @@ public struct Notebook: Sendable, Hashable {
             return .text(joined(output["text"]), isError: output["name"]?.stringValue == "stderr")
         case "execute_result", "display_data":
             let data = output["data"]
+            // Richest representation first, like Jupyter.
+            if let html = data?["text/html"] { return .web(joined(html), kind: "text/html") }
+            if let markdown = data?["text/markdown"] { return .markdown(joined(markdown)) }
+            for mime in ["text/latex", "image/svg+xml"] {
+                if let value = data?[mime] { return .web(joined(value), kind: mime) }
+            }
             for mime in ["image/png", "image/jpeg"] {
                 if let base64 = data?[mime].map({ joined($0) }),
                    let bytes = Data(base64Encoded: base64.filter { !$0.isWhitespace }) {

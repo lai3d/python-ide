@@ -54,6 +54,38 @@ import Testing
     }
 
     @Test(.enabled(if: PythonEnvironment.interpreter(for: nil) != nil), .timeLimit(.minutes(1)))
+    func emitsRichMimeBundles() async throws {
+        let kernel = NotebookKernel()
+        let events = Events()
+        kernel.onEvent = { events.add($0) }
+        try kernel.start(interpreter: try #require(PythonEnvironment.interpreter(for: nil)),
+                         environment: ToolLocator.environment(), currentDirectory: nil)
+        defer { kernel.stop() }
+
+        let run = kernel.execute(#"""
+            class Table:
+                def _repr_html_(self): return "<table><tr><td>1</td></tr></table>"
+                def _repr_latex_(self): return ("$x^2$", {})
+                def __repr__(self): return "Table()"
+            class Weird:
+                def __getattr__(self, name): return lambda *a, **k: object()  # not a valid repr
+            display(Table(), Weird())
+            Table
+            Table()
+            """#)
+        try await wait { events.done(run) != nil }
+        let outputs = events.outputs(run)
+        let displayed = outputs.filter { $0["output_type"] == "display_data" }
+        #expect(displayed.count == 2)
+        #expect(displayed.first?["data"]?["text/html"] == "<table><tr><td>1</td></tr></table>")
+        #expect(displayed.first?["data"]?["text/latex"] == "$x^2$")
+        #expect(displayed.last?["data"]?.objectValue?.keys.sorted() == ["text/plain"])
+        let result = try #require(outputs.first { $0["output_type"] == "execute_result" })
+        #expect(result["data"]?["text/plain"] == "Table()")
+        #expect(result["data"]?["text/html"] != nil)
+    }
+
+    @Test(.enabled(if: PythonEnvironment.interpreter(for: nil) != nil), .timeLimit(.minutes(1)))
     func runsCellsInOneNamespace() async throws {
         let kernel = NotebookKernel()
         let events = Events()
