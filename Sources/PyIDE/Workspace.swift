@@ -24,6 +24,17 @@ struct ProblemItem: Identifiable {
     var fileName: String { (path as NSString).lastPathComponent }
 }
 
+/// A file open in an editor tab.
+struct OpenDocument: Identifiable {
+    let url: URL
+    var text: String
+    var isDirty = false
+    var version = 1
+    /// Normalized path; the identity used for tabs, diagnostics and editor state.
+    var id: String { Workspace.key(for: url) }
+    var name: String { url.lastPathComponent }
+}
+
 /// The run-menu actions.
 enum RunAction {
     case runFile, test, check
@@ -35,9 +46,8 @@ enum RunAction {
 final class Workspace {
     private(set) var rootURL: URL?
     private(set) var fileTree: [FileNode] = []
+    private(set) var documents: [OpenDocument] = []
     private(set) var currentFile: URL?
-    private(set) var text = ""
-    private(set) var isDirty = false
     private(set) var diagnostics: [String: [Diagnostic]] = [:]  // keyed by normalized path
     private(set) var lspStatus = "Language server: not started"
     private(set) var interpreter: URL?
@@ -52,7 +62,6 @@ final class Workspace {
     @ObservationIgnored private var lsp: LSPClient?
     @ObservationIgnored private var lspName = "Language server"
     @ObservationIgnored private var lspReady = false
-    @ObservationIgnored private var documentVersion = 0
     @ObservationIgnored private var runProcess: Process?
     @ObservationIgnored private var runInput: FileHandle?
     @ObservationIgnored private var handledLaunchArguments = false
@@ -68,12 +77,25 @@ final class Workspace {
         }
     }
 
+    private var currentIndex: Int? {
+        guard let currentFile else { return nil }
+        let key = Self.key(for: currentFile)
+        return documents.firstIndex { $0.id == key }
+    }
+
+    var text: String { currentIndex.map { documents[$0].text } ?? "" }
+    var isDirty: Bool { currentIndex.map { documents[$0].isDirty } ?? false }
+    var hasUnsavedChanges: Bool { documents.contains { $0.isDirty } }
+    var currentDocumentID: String { currentFile.map(Self.key(for:)) ?? "" }
+
     var isPythonFile: Bool { currentFile.map(Self.isPython) ?? false }
 
     /// Files outside the project (stdlib, typeshed stubs) or inside a virtualenv are opened read-only.
-    var isReadOnly: Bool {
-        guard let currentFile, let rootURL else { return false }
-        let path = Self.key(for: currentFile)
+    var isReadOnly: Bool { currentFile.map(isReadOnly) ?? false }
+
+    func isReadOnly(_ url: URL) -> Bool {
+        guard let rootURL else { return false }
+        let path = Self.key(for: url)
         let root = Self.key(for: rootURL)
         guard path.hasPrefix(root + "/") else { return true }
         let relative = path.dropFirst(root.count + 1)
@@ -117,14 +139,13 @@ final class Workspace {
     }
 
     func openFolder(_ url: URL) async {
-        if isDirty { save() }
+        guard confirmDiscardOrSave(documents.filter(\.isDirty)) else { return }
         await stopLanguageServer()
         rootURL = url
         fileTree = FileNode.loadTree(at: url)
         interpreter = PythonEnvironment.interpreter(for: url)
         currentFile = nil
-        text = ""
-        isDirty = false
+        documents = []
         diagnostics = [:]
         output = ""
         backStack = []
@@ -161,46 +182,122 @@ final class Workspace {
 
     // MARK: - Files
 
+    /// Opens `url` in a tab (or switches to its existing tab).
     func openFile(_ url: URL) {
-        guard url != currentFile else { return }
-        if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { return }
-        if isDirty { save() }
-        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
-            appendOutput("Cannot open \(url.path) (not UTF-8 text?)\n")
+        let key = Self.key(for: url)
+        if documents.contains(where: { $0.id == key }) {
+            currentFile = url
             return
         }
-        closeCurrentDocument()
+        if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { return }
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            appendOutput("Cannot open \(url.path) (not UTF-8 text?)\n")
+            bottomTab = .output
+            return
+        }
+        let document = OpenDocument(url: url, text: contents)
+        let insertAt = currentIndex.map { $0 + 1 } ?? documents.count
+        documents.insert(document, at: insertAt)
         currentFile = url
-        text = contents
-        isDirty = false
         caretOffset = 0
-        documentVersion = 1
-        sendDidOpen()
+        sendDidOpen(document)
+    }
+
+    func selectTab(_ document: OpenDocument) {
+        currentFile = document.url
+    }
+
+    func selectAdjacentTab(_ delta: Int) {
+        guard let index = currentIndex, documents.count > 1 else { return }
+        let next = (index + delta + documents.count) % documents.count
+        currentFile = documents[next].url
+    }
+
+    /// Closes a tab, asking to save it first if it has unsaved changes.
+    func close(_ document: OpenDocument) {
+        guard let index = documents.firstIndex(where: { $0.id == document.id }) else { return }
+        guard confirmDiscardOrSave([documents[index]]) else { return }
+        let closing = documents.remove(at: index)
+        sendDidClose(closing)
+        diagnostics.removeValue(forKey: closing.id)  // re-published if the file is reopened
+        if currentFile.map(Self.key(for:)) == closing.id {
+            currentFile = documents.isEmpty ? nil : documents[min(index, documents.count - 1)].url
+        }
+    }
+
+    func closeCurrentTab() {
+        if let index = currentIndex { close(documents[index]) }
+    }
+
+    func closeOthers(_ keep: OpenDocument) {
+        for document in documents where document.id != keep.id { close(document) }
+    }
+
+    func closeAll() {
+        for document in documents { close(document) }
     }
 
     func updateText(_ newText: String) {
-        guard newText != text else { return }
-        text = newText
-        isDirty = true
-        documentVersion += 1
-        guard lspReady, isPythonFile, let url = currentFile else { return }
+        guard let index = currentIndex, documents[index].text != newText else { return }
+        documents[index].text = newText
+        documents[index].isDirty = true
+        documents[index].version += 1
+        guard lspReady, Self.isPython(documents[index].url) else { return }
         try? lsp?.notify("textDocument/didChange", params: [
-            "textDocument": ["uri": .string(url.absoluteString), "version": .int(documentVersion)],
+            "textDocument": ["uri": .string(documents[index].url.absoluteString), "version": .int(documents[index].version)],
             "contentChanges": [["text": .string(newText)]],
         ])
     }
 
     func save() {
-        guard let url = currentFile, !isReadOnly else { return }
+        if let index = currentIndex { save(at: index) }
+    }
+
+    func saveAll() {
+        for index in documents.indices where documents[index].isDirty { save(at: index) }
+    }
+
+    @discardableResult
+    private func save(at index: Int) -> Bool {
+        let document = documents[index]
+        guard !isReadOnly(document.url) else { return false }
         do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
-            isDirty = false
-            if lspReady, isPythonFile {
-                try? lsp?.notify("textDocument/didSave", params: ["textDocument": ["uri": .string(url.absoluteString)]])
+            try document.text.write(to: document.url, atomically: true, encoding: .utf8)
+            documents[index].isDirty = false
+            if lspReady, Self.isPython(document.url) {
+                try? lsp?.notify("textDocument/didSave", params: ["textDocument": ["uri": .string(document.url.absoluteString)]])
             }
+            return true
         } catch {
             appendOutput("Save failed: \(error.localizedDescription)\n")
             bottomTab = .output
+            return false
+        }
+    }
+
+    /// For dirty documents about to be closed: asks Save / Don't Save / Cancel.
+    /// Returns false if the user cancelled (or a save failed).
+    func confirmDiscardOrSave(_ dirty: [OpenDocument]) -> Bool {
+        let dirty = dirty.filter(\.isDirty)
+        guard !dirty.isEmpty else { return true }
+        let alert = NSAlert()
+        alert.messageText = dirty.count == 1
+            ? "Do you want to save the changes you made to \(dirty[0].name)?"
+            : "Do you want to save the changes to \(dirty.count) files?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: dirty.count == 1 ? "Save" : "Save All")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Don't Save")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            for document in dirty {
+                guard let index = documents.firstIndex(where: { $0.id == document.id }), save(at: index) else { return false }
+            }
+            return true
+        case .alertThirdButtonReturn:
+            return true
+        default:
+            return false
         }
     }
 
@@ -309,7 +406,7 @@ final class Workspace {
             try client.notify("workspace/didChangeConfiguration", params: ["settings": [:]])
             lspReady = true
             lspStatus = "\(spec.name): ready"
-            sendDidOpen()
+            documents.forEach(sendDidOpen)
         } catch {
             if lsp === client { lsp = nil }
             lspStatus = "\(spec.name) failed: \(error.localizedDescription)"
@@ -346,21 +443,21 @@ final class Workspace {
         }
     }
 
-    private func sendDidOpen() {
-        guard lspReady, isPythonFile, let url = currentFile else { return }
+    private func sendDidOpen(_ document: OpenDocument) {
+        guard lspReady, Self.isPython(document.url) else { return }
         try? lsp?.notify("textDocument/didOpen", params: [
             "textDocument": [
-                "uri": .string(url.absoluteString),
+                "uri": .string(document.url.absoluteString),
                 "languageId": "python",
-                "version": .int(documentVersion),
-                "text": .string(text),
+                "version": .int(document.version),
+                "text": .string(document.text),
             ],
         ])
     }
 
-    private func closeCurrentDocument() {
-        guard lspReady, isPythonFile, let url = currentFile else { return }
-        try? lsp?.notify("textDocument/didClose", params: ["textDocument": ["uri": .string(url.absoluteString)]])
+    private func sendDidClose(_ document: OpenDocument) {
+        guard lspReady, Self.isPython(document.url) else { return }
+        try? lsp?.notify("textDocument/didClose", params: ["textDocument": ["uri": .string(document.url.absoluteString)]])
     }
 
     private static func initializeParams(root: URL) -> JSONValue {
@@ -396,7 +493,7 @@ final class Workspace {
             bottomTab = .output
             return
         }
-        if isDirty { save() }
+        saveAll()
         let tools = PythonEnvironment.toolDirectories(for: python)
 
         switch action {
@@ -515,11 +612,11 @@ final class Workspace {
 
     // MARK: - Helpers
 
-    static func key(for url: URL) -> String {
+    nonisolated static func key(for url: URL) -> String {
         url.resolvingSymlinksInPath().path
     }
 
-    static func isPython(_ url: URL) -> Bool {
+    nonisolated static func isPython(_ url: URL) -> Bool {
         ["py", "pyi", "pyw"].contains(url.pathExtension)
     }
 

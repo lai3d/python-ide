@@ -13,6 +13,10 @@ struct EditorServices {
 /// An NSTextView-based code editor with Python highlighting and indentation, diagnostics,
 /// completion (type or Esc), hover info, and ⌘-click go-to-definition.
 struct CodeEditorView: NSViewRepresentable {
+    /// Identifies the open document; each one keeps its own caret, scroll position and undo history.
+    var documentID: String
+    /// All open documents, so state for closed ones can be dropped.
+    var openDocumentIDs: Set<String>
     var text: String
     var highlightCode: Bool
     var isEditable: Bool
@@ -31,7 +35,9 @@ struct CodeEditorView: NSViewRepresentable {
         scrollView.borderType = .noBorder
 
         let big = CGFloat.greatestFiniteMagnitude
-        let textView = CodeTextView(frame: NSRect(origin: .zero, size: scrollView.contentSize))
+        // TextKit 1: the line-number ruler lays out against NSLayoutManager.
+        let textView = CodeTextView(usingTextLayoutManager: false)
+        textView.frame = NSRect(origin: .zero, size: scrollView.contentSize)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: big, height: big)
         textView.isVerticallyResizable = true
@@ -73,8 +79,16 @@ struct CodeEditorView: NSViewRepresentable {
             coordinator, selector: #selector(Coordinator.didScroll(_:)),
             name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
 
+        let ruler = LineNumberRuler(textView: textView, scrollView: scrollView)
+        scrollView.verticalRulerView = ruler
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
+
         coordinator.textView = textView
+        coordinator.ruler = ruler
+        coordinator.documentID = documentID
         textView.string = text
+        ruler.textDidChange()
         coordinator.applyStyling()
         return scrollView
     }
@@ -85,14 +99,12 @@ struct CodeEditorView: NSViewRepresentable {
         guard let textView = coordinator.textView else { return }
         if textView.isEditable != isEditable { textView.isEditable = isEditable }
 
-        if textView.string != text {
-            // A different file was opened (typing never gets here: text already matches).
-            coordinator.dismissPopups()
-            textView.string = text
-            textView.undoManager?.removeAllActions()
-            textView.setSelectedRange(NSRange(location: 0, length: 0))
-            textView.scrollToBeginningOfDocument(nil)
-            coordinator.applyStyling()
+        coordinator.retainDocuments(openDocumentIDs.union([documentID]))
+        if coordinator.documentID != documentID {
+            coordinator.switchDocument(to: documentID, text: text)
+        } else if textView.string != text {
+            // Replaced from outside (e.g. reloaded); typing never gets here since text already matches.
+            coordinator.replaceText(text)
         } else if coordinator.appliedDiagnostics != diagnostics || coordinator.appliedHighlightCode != highlightCode {
             coordinator.applyStyling()
         }
@@ -121,6 +133,16 @@ struct CodeEditorView: NSViewRepresentable {
         var appliedDiagnostics: [Diagnostic] = []
         var appliedHighlightCode = false
         var lastRevealID: UUID?
+        weak var ruler: LineNumberRuler?
+        var documentID = ""
+
+        /// Per-document editor state, restored when switching tabs.
+        private struct ViewState {
+            var selection: NSRange
+            var scrollOrigin: NSPoint
+        }
+        private var viewStates: [String: ViewState] = [:]
+        private var undoManagers: [String: UndoManager] = [:]
 
         private let completionPopup = CompletionPopup()
         private var completionItems: [CompletionItem] = []
@@ -138,6 +160,54 @@ struct CodeEditorView: NSViewRepresentable {
             completionPopup.onAccept = { [weak self] item in self?.accept(item) }
         }
 
+        // MARK: Documents
+
+        func undoManager(for view: NSTextView) -> UndoManager? {
+            if let manager = undoManagers[documentID] { return manager }
+            let manager = UndoManager()
+            undoManagers[documentID] = manager
+            return manager
+        }
+
+        func switchDocument(to id: String, text: String) {
+            guard let textView, let scrollView = textView.enclosingScrollView else { return }
+            dismissPopups()
+            viewStates[documentID] = ViewState(selection: textView.selectedRange(),
+                                               scrollOrigin: scrollView.contentView.bounds.origin)
+            documentID = id
+            textView.string = text
+            ruler?.textDidChange()
+            applyStyling()
+            let length = (text as NSString).length
+            if let state = viewStates[id], NSMaxRange(state.selection) <= length {
+                textView.setSelectedRange(state.selection)
+                textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+                scrollView.contentView.scroll(to: state.scrollOrigin)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            } else {
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+                textView.scrollToBeginningOfDocument(nil)
+            }
+        }
+
+        /// Forgets state for documents that are no longer open.
+        func retainDocuments(_ ids: Set<String>) {
+            viewStates = viewStates.filter { ids.contains($0.key) }
+            undoManagers = undoManagers.filter { ids.contains($0.key) }
+        }
+
+        func replaceText(_ text: String) {
+            guard let textView else { return }
+            dismissPopups()
+            let selection = textView.selectedRange()
+            textView.string = text
+            undoManagers[documentID]?.removeAllActions()
+            let length = (text as NSString).length
+            textView.setSelectedRange(NSRange(location: min(selection.location, length), length: 0))
+            ruler?.textDidChange()
+            applyStyling()
+        }
+
         // MARK: Text changes
 
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
@@ -148,6 +218,7 @@ struct CodeEditorView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
             parent.onChange(textView.string)
+            ruler?.textDidChange()
             applyStyling()
             endHover()
 
@@ -176,6 +247,7 @@ struct CodeEditorView: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
             parent.services.caretMoved(textView.selectedRange().location)
+            ruler?.needsDisplay = true
         }
 
         // MARK: Keys
@@ -454,6 +526,7 @@ struct CodeEditorView: NSViewRepresentable {
 
         @objc func didScroll(_ notification: Notification) {
             dismissPopups()
+            ruler?.needsDisplay = true
         }
 
         // MARK: Styling
@@ -484,6 +557,7 @@ struct CodeEditorView: NSViewRepresentable {
             }
             storage.endEditing()
 
+            ruler?.setDiagnostics(parent.diagnostics)
             appliedDiagnostics = parent.diagnostics
             appliedHighlightCode = parent.highlightCode
         }

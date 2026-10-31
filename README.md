@@ -8,6 +8,8 @@ Sibling project of [golang-ide](https://github.com/lai3d/golang-ide), sharing th
 ## Features
 
 - Project sidebar (open any folder; hides `__pycache__`, `.venv`, caches, `*.egg-info`)
+- **Tabs** for multiple open files: each keeps its own caret, scroll position and undo history; ⌘W closes (asks to save unsaved changes), ⇧⌘] / ⇧⌘[ switch, ⌥⌘S saves all; right-click for Close Others / Close All / Reveal in Finder
+- **Line-number gutter** with the caret line highlighted and red/yellow dots on lines with errors/warnings; click a number to select the line
 - NSTextView editor with Python syntax highlighting (keywords, soft keywords `match`/`case`, decorators, f/r/b and triple-quoted strings), find bar, undo
 - Python editing: 4-space soft tabs, auto-indent after `:` and open brackets, dedent after `return`/`pass`/`break`/`continue`/`raise`, smart backspace through indents, ⇥/⇧⇥ to indent/dedent selected lines, ⌘/ to toggle `#` comments
 - **pyright** (or basedpyright / pylsp / jedi-language-server) over LSP:
@@ -53,7 +55,6 @@ You can also open `Package.swift` in Xcode.
 
 - Find references, rename, signature help, code actions
 - Format on save (ruff format / black)
-- Line-number gutter, tabs for multiple open files
 - Integrated REPL panel; Jupyter notebook viewing
 - tree-sitter-python for incremental highlighting
 - Debugging via debugpy's DAP (breakpoints, stepping, variables)

@@ -12,6 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    weak var workspace: Workspace?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let workspace else { return .terminateNow }
+        return workspace.confirmDiscardOrSave(workspace.documents) ? .terminateNow : .terminateCancel
+    }
 }
 
 @main
@@ -24,6 +31,7 @@ struct PyIDEApp: App {
             ContentView()
                 .environment(workspace)
                 .frame(minWidth: 900, minHeight: 600)
+                .onAppear { appDelegate.workspace = workspace }
         }
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -31,9 +39,15 @@ struct PyIDEApp: App {
                     .keyboardShortcut("o")
             }
             CommandGroup(replacing: .saveItem) {
+                Button("Close Tab") { workspace.closeCurrentTab() }
+                    .keyboardShortcut("w")
+                    .disabled(workspace.currentFile == nil)
                 Button("Save") { workspace.save() }
                     .keyboardShortcut("s")
                     .disabled(workspace.currentFile == nil)
+                Button("Save All") { workspace.saveAll() }
+                    .keyboardShortcut("s", modifiers: [.option, .command])
+                    .disabled(!workspace.hasUnsavedChanges)
             }
             CommandMenu("Navigate") {
                 Button("Jump to Definition") {
@@ -44,6 +58,13 @@ struct PyIDEApp: App {
                 Button("Go Back") { workspace.goBack() }
                     .keyboardShortcut(.leftArrow, modifiers: [.control, .command])
                     .disabled(!workspace.canGoBack)
+                Divider()
+                Button("Next Tab") { workspace.selectAdjacentTab(1) }
+                    .keyboardShortcut("]", modifiers: [.shift, .command])
+                    .disabled(workspace.documents.count < 2)
+                Button("Previous Tab") { workspace.selectAdjacentTab(-1) }
+                    .keyboardShortcut("[", modifiers: [.shift, .command])
+                    .disabled(workspace.documents.count < 2)
             }
             CommandMenu("Python") {
                 Button("Run File") { workspace.run(.runFile) }

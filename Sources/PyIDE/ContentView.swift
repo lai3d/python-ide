@@ -96,10 +96,16 @@ struct EditorArea: View {
     var body: some View {
         VSplitView {
             VStack(spacing: 0) {
+                if !workspace.documents.isEmpty {
+                    TabBar()
+                    Divider()
+                }
                 EditorHeader()
                 Divider()
                 if workspace.currentFile != nil {
                     CodeEditorView(
+                        documentID: workspace.currentDocumentID,
+                        openDocumentIDs: Set(workspace.documents.map(\.id)),
                         text: workspace.text,
                         highlightCode: workspace.isPythonFile,
                         isEditable: !workspace.isReadOnly,
@@ -125,6 +131,81 @@ struct EditorArea: View {
     }
 }
 
+struct TabBar: View {
+    @Environment(Workspace.self) private var workspace
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(workspace.documents) { document in
+                        TabItem(document: document, isSelected: document.id == workspace.currentDocumentID)
+                            .id(document.id)
+                        Divider().frame(height: 18)
+                    }
+                }
+            }
+            .onChange(of: workspace.currentDocumentID) { _, id in
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) }
+            }
+        }
+        .frame(height: 30)
+        .background(.bar)
+    }
+}
+
+struct TabItem: View {
+    @Environment(Workspace.self) private var workspace
+    let document: OpenDocument
+    let isSelected: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: workspace.isReadOnly(document.url) ? "lock.doc" : "doc.text")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(document.name)
+                .font(.callout)
+                .fontWeight(isSelected ? .medium : .regular)
+                .foregroundStyle(isSelected ? .primary : .secondary)
+                .lineLimit(1)
+            ZStack {
+                if isHovering || !document.isDirty {
+                    Button { workspace.close(document) } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                    }
+                    .buttonStyle(.borderless)
+                    .opacity(isHovering || isSelected ? 1 : 0)
+                    .help("Close Tab (⌘W)")
+                } else {
+                    Circle().fill(.secondary).frame(width: 7, height: 7).help("Unsaved changes")
+                }
+            }
+            .frame(width: 14, height: 14)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .frame(height: 30)
+        .background(isSelected ? Color(nsColor: .textBackgroundColor) : .clear)
+        .overlay(alignment: .top) {
+            if isSelected { Rectangle().fill(Color.accentColor).frame(height: 2) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { workspace.selectTab(document) }
+        .onHover { isHovering = $0 }
+        .help(workspace.relativePath(document.url))
+        .contextMenu {
+            Button("Close") { workspace.close(document) }
+            Button("Close Others") { workspace.closeOthers(document) }
+                .disabled(workspace.documents.count < 2)
+            Button("Close All") { workspace.closeAll() }
+            Divider()
+            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([document.url]) }
+        }
+    }
+}
+
 struct EditorHeader: View {
     @Environment(Workspace.self) private var workspace
 
@@ -135,25 +216,20 @@ struct EditorHeader: View {
                 .disabled(!workspace.canGoBack)
                 .help("Go Back (⌃⌘←)")
             if let file = workspace.currentFile {
-                Image(systemName: "doc.text").foregroundStyle(.secondary)
-                Text(file.lastPathComponent).fontWeight(.medium)
+                Text(relativePath(file)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
                 if workspace.isReadOnly {
                     Text("Read Only")
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(.quaternary, in: Capsule())
                 }
-                if workspace.isDirty {
-                    Circle().fill(.secondary).frame(width: 7, height: 7).help("Unsaved changes")
-                }
                 Spacer()
-                Text(relativePath(file)).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
             } else {
                 Spacer()
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 28)
+        .frame(height: 24)
     }
 
     private func relativePath(_ url: URL) -> String { workspace.relativePath(url) }
