@@ -729,11 +729,26 @@ final class Workspace {
                 actions += CodeAction.parseAll(result)
             }
         }
-        // Quick fixes first (preferred on top), then source actions like "Fix all".
-        actions.sort { a, b in
-            if a.isQuickFix != b.isQuickFix { return a.isQuickFix }
-            return a.isPreferred && !b.isPreferred
+        // Quick fixes first; among them, fixes for the narrowest problem under the caret, then
+        // preferred ones; source actions like "Fix all" last.
+        let index = LineIndex(text)
+        func caretSpan(_ action: CodeAction) -> Int {
+            let spans = (action.raw["diagnostics"]?.arrayValue ?? []).compactMap { diagnostic -> Int? in
+                guard let start = TextPosition(json: diagnostic["range"]?["start"]),
+                      let end = TextPosition(json: diagnostic["range"]?["end"]) else { return nil }
+                let range = index.range(from: start, to: end)
+                return NSLocationInRange(offset, range) || offset == NSMaxRange(range) ? range.length : nil
+            }
+            return spans.min() ?? Int.max
         }
+        actions = actions.enumerated().sorted { lhs, rhs in
+            let (a, b) = (lhs.element, rhs.element)
+            if a.isQuickFix != b.isQuickFix { return a.isQuickFix }
+            let (sa, sb) = (caretSpan(a), caretSpan(b))
+            if sa != sb { return sa < sb }
+            if a.isPreferred != b.isPreferred { return a.isPreferred }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
         guard !actions.isEmpty else {
             flashStatus("No quick fixes here")
             return

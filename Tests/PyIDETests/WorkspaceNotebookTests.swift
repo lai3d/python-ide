@@ -1,0 +1,69 @@
+import Foundation
+import Testing
+@testable import PyIDE
+@testable import PyIDECore
+
+/// Exercises the real wiring: Workspace → NotebookKernel → NotebookModel → saved .ipynb.
+@MainActor
+@Suite(.serialized) struct WorkspaceNotebookTests {
+    static let notebook = """
+        {"cells": [
+          {"cell_type": "markdown", "id": "m", "metadata": {}, "source": ["# Test"]},
+          {"cell_type": "code", "id": "a", "metadata": {}, "execution_count": null, "outputs": [],
+           "source": ["total = sum(range(5))\\n", "print('total is', total)\\n", "total * 2"]},
+          {"cell_type": "code", "id": "b", "metadata": {}, "execution_count": null, "outputs": [],
+           "source": ["total / 0"]}
+         ],
+         "metadata": {"kernelspec": {"language": "python", "name": "python3"}},
+         "nbformat": 4, "nbformat_minor": 5}
+        """
+
+    private func waitUntil(_ timeout: Duration = .seconds(20), _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
+    }
+
+    @Test(.enabled(if: PythonEnvironment.interpreter(for: nil) != nil), .timeLimit(.minutes(1)))
+    func runAllCellsAndSave() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pyide-ws-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("test.ipynb")
+        try Self.notebook.write(to: file, atomically: true, encoding: .utf8)
+
+        let workspace = Workspace()
+        await workspace.openFolder(dir)
+        #expect(workspace.isNotebook, "the only file, a notebook, should open")
+        guard case .success(let model)? = workspace.notebookModel() else {
+            Issue.record("notebook did not load")
+            return
+        }
+
+        workspace.runAllCells(in: model)
+        try await waitUntil { model.cells.filter { $0.kind == .code }.allSatisfy { $0.executionCount != nil } }
+        let first = model.cells[1], second = model.cells[2]
+        #expect(first.executionCount == 1 && second.executionCount == 2)
+        #expect(first.outputs.contains { $0["output_type"] == "stream" && $0["text"]?.stringValue == "total is 10\n" },
+                "outputs: \(first.outputs)")
+        #expect(first.outputs.contains { $0["data"]?["text/plain"] == "20" })
+        #expect(second.outputs.first?["ename"] == "ZeroDivisionError")
+        #expect(model.kernelStatus == .idle)
+        try await waitUntil { workspace.isDirty }  // written back to the document after a short debounce
+        #expect(workspace.isDirty)
+
+        workspace.save()
+        try await waitUntil { !workspace.isDirty }
+        let saved = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: file))
+        #expect(saved["cells"]?[1]?["execution_count"] == 1)
+        #expect(saved["cells"]?[1]?["outputs"]?[0]?["text"] == ["total is 10\n"])
+        #expect(saved["cells"]?[2]?["outputs"]?[0]?["ename"] == "ZeroDivisionError")
+
+        // Restart clears the namespace: `total` is gone in the new kernel.
+        workspace.restartKernel(for: model)
+        let probe = model.insertCell(.code, after: model.cells.last?.id)
+        model.setSource("'total' in globals()", of: probe)
+        workspace.runCells([probe], in: model)
+        try await waitUntil { model.cells.last?.executionCount != nil }
+        #expect(model.cells.last?.outputs.first?["data"]?["text/plain"] == "False")
+    }
+}

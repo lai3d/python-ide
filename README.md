@@ -44,7 +44,8 @@ PyIDE looks for tools in the interpreter's `bin` directory first, then `PATH`, `
 
 ```sh
 swift run PyIDE Examples/hello     # run in debug, opening the example project
-swift test                         # unit tests + language-server end-to-end tests
+swift test                         # core unit tests, language-server/debugger/kernel end-to-end tests,
+                                   # and app-level tests that drive the Workspace directly
 ./scripts/bundle.sh                # build build/PyIDE.app (release, ad-hoc signed)
 open build/PyIDE.app
 ```
@@ -57,7 +58,8 @@ You can also open `Package.swift` in Xcode.
 |---|---|
 | `Sources/PyIDECore` | UI-independent core: JSON-RPC/LSP client, message framing, Python highlighter & indent rules, interpreter / language-server discovery, LSP position math, file tree |
 | `Sources/PyIDE` | SwiftUI app: workspace state, editor view, sidebar, panels |
-| `Tests/PyIDECoreTests` | swift-testing tests |
+| `Tests/PyIDECoreTests` | swift-testing tests for the core |
+| `Tests/PyIDETests` | App-level tests that drive `Workspace` (notebook runs, format on save, quick fixes) |
 | `Examples/hello` | Small Python project for trying things out |
 
 ## Roadmap
