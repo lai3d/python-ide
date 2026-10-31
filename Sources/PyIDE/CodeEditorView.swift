@@ -10,7 +10,7 @@ struct EditorServices {
     var definition: @MainActor (Int) -> Void
     var references: @MainActor (Int) -> Void
     var rename: @MainActor (Int) -> Void
-    var caretMoved: @MainActor (Int) -> Void
+    var caretMoved: @MainActor (NSRange) -> Void
 }
 
 /// An NSTextView-based code editor with Python highlighting and indentation, diagnostics,
@@ -91,6 +91,7 @@ struct CodeEditorView: NSViewRepresentable {
         coordinator.ruler = ruler
         coordinator.documentID = documentID
         textView.string = text
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
         ruler.textDidChange()
         coordinator.applyStyling()
         return scrollView
@@ -278,7 +279,7 @@ struct CodeEditorView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
-            parent.services.caretMoved(textView.selectedRange().location)
+            parent.services.caretMoved(textView.selectedRange())
             ruler?.needsDisplay = true
             if signaturePopup.isVisible, let start = signatureLineStart {
                 let ns = textView.string as NSString

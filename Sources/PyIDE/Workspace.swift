@@ -3,7 +3,7 @@ import PyIDECore
 import Observation
 
 enum BottomTab: Hashable {
-    case problems, output, references
+    case problems, output, references, repl
 }
 
 /// One result of Find References, with its source line for context.
@@ -73,6 +73,12 @@ final class Workspace {
     private(set) var referencesQuery = ""
     /// UTF-16 caret offset in the current file, reported by the editor.
     @ObservationIgnored var caretOffset = 0
+    /// Current editor selection (UTF-16), reported by the editor.
+    @ObservationIgnored var selectedRange = NSRange(location: 0, length: 0)
+
+    private(set) var replOutput = ""
+    private(set) var isREPLRunning = false
+    @ObservationIgnored private var repl: PythonREPL?
 
     @ObservationIgnored private var lsp: LSPClient?
     @ObservationIgnored private var lspName = "Language server"
@@ -155,6 +161,8 @@ final class Workspace {
 
     func openFolder(_ url: URL) async {
         guard confirmDiscardOrSave(documents.filter(\.isDirty)) else { return }
+        stopREPL()
+        replOutput = ""
         await stopLanguageServer()
         rootURL = url
         fileTree = FileNode.loadTree(at: url)
@@ -192,6 +200,7 @@ final class Workspace {
             return
         }
         interpreter = url
+        if repl != nil { restartREPL() }
         Task { await restartLanguageServer() }
     }
 
@@ -799,6 +808,83 @@ final class Workspace {
             process.terminationHandler = { continuation.resume(returning: $0.terminationStatus == 0) }
             do { try process.run() } catch { continuation.resume(returning: false) }
         }
+    }
+
+    // MARK: - REPL
+
+    func startREPL() {
+        guard repl == nil else { return }
+        guard let python = interpreter else {
+            replOutput += "Python not found. Choose an interpreter first.\n"
+            return
+        }
+        let session = PythonREPL()
+        session.onOutput = { chunk in Task { @MainActor in self.appendREPL(chunk) } }
+        session.onExit = { status in
+            Task { @MainActor in
+                guard self.repl === session else { return }
+                self.repl = nil
+                self.isREPLRunning = false
+                self.appendREPL("\n[REPL exited with status \(status)]\n")
+            }
+        }
+        do {
+            try session.start(interpreter: python, environment: ToolLocator.environment(interpreter: python),
+                              currentDirectory: rootURL)
+            repl = session
+            isREPLRunning = true
+            appendREPL("# Python REPL — \(python.path)\(rootURL.map { "\n# cwd: \($0.path)" } ?? "")\n")
+        } catch {
+            appendREPL("Failed to start REPL: \(error.localizedDescription)\n")
+        }
+    }
+
+    /// Sends one line typed in the REPL panel (echoed, since a piped REPL doesn't echo input).
+    func sendREPLLine(_ line: String) {
+        if repl == nil { startREPL() }
+        appendREPL(line + "\n")
+        repl?.send(line)
+    }
+
+    /// Sends the editor selection, or the caret's line, to the REPL.
+    func sendSelectionToREPL() {
+        let ns = text as NSString
+        guard ns.length > 0 else { return }
+        let selection = NSRange(location: min(selectedRange.location, ns.length),
+                                length: min(selectedRange.length, ns.length - min(selectedRange.location, ns.length)))
+        let range = selection.length > 0 ? selection : ns.lineRange(for: NSRange(location: selection.location, length: 0))
+        let code = PythonREPL.prepareForSending(ns.substring(with: range))
+        guard !code.isEmpty else {
+            flashStatus("Nothing to send — select code or put the caret on a line")
+            return
+        }
+        bottomTab = .repl
+        if repl == nil { startREPL() }
+        appendREPL(code)
+        repl?.send(code)
+    }
+
+    func interruptREPL() { repl?.interrupt() }
+
+    func restartREPL() {
+        stopREPL()
+        appendREPL("\n# Restarting…\n")
+        startREPL()
+    }
+
+    func clearREPL() { replOutput = "" }
+
+    private func stopREPL() {
+        guard let session = repl else { return }
+        repl = nil
+        isREPLRunning = false
+        session.onExit = nil
+        session.stop()
+    }
+
+    private func appendREPL(_ s: String) {
+        replOutput += s
+        if replOutput.utf16.count > 400_000 { replOutput = String(replOutput.suffix(300_000)) }
     }
 
     // MARK: - Helpers

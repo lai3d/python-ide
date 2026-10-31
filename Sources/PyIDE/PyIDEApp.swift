@@ -88,6 +88,18 @@ struct PyIDEApp: App {
                 Button("Stop") { workspace.stopRun() }
                     .keyboardShortcut(".")
                 Divider()
+                Button("Open REPL") {
+                    workspace.bottomTab = .repl
+                    workspace.startREPL()
+                }
+                .keyboardShortcut("p", modifiers: [.control, .command])
+                .disabled(workspace.rootURL == nil)
+                Button("Send Selection to REPL") { workspace.sendSelectionToREPL() }
+                    .keyboardShortcut(.return, modifiers: [.control])
+                    .disabled(!workspace.isPythonFile)
+                Button("Restart REPL") { workspace.restartREPL() }
+                    .disabled(workspace.rootURL == nil)
+                Divider()
                 Button("Format Document") { workspace.formatDocument() }
                     .keyboardShortcut("f", modifiers: [.shift, .option])
                     .disabled(!workspace.isPythonFile || workspace.isReadOnly)

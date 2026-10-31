@@ -118,7 +118,10 @@ struct EditorArea: View {
                             definition: { offset in Task { await workspace.jumpToDefinition(at: offset) } },
                             references: { offset in Task { await workspace.findReferences(at: offset) } },
                             rename: { offset in Task { await workspace.renameSymbol(at: offset) } },
-                            caretMoved: { workspace.caretOffset = $0 }),
+                            caretMoved: {
+                                workspace.caretOffset = $0.location
+                                workspace.selectedRange = $0
+                            }),
                         onChange: { workspace.updateText($0) })
                 } else {
                     Text("Select a file")
@@ -248,6 +251,7 @@ struct BottomPanel: View {
                 Picker("Panel", selection: $workspace.bottomTab) {
                     Text("Problems (\(workspace.allProblems.count))").tag(BottomTab.problems)
                     Text("Output").tag(BottomTab.output)
+                    Text("REPL").tag(BottomTab.repl)
                     if !workspace.references.isEmpty || workspace.bottomTab == .references {
                         Text("References (\(workspace.references.count))").tag(BottomTab.references)
                     }
@@ -279,6 +283,7 @@ struct BottomPanel: View {
             case .problems: ProblemsList()
             case .output: OutputView()
             case .references: ReferencesList()
+            case .repl: REPLView()
             }
         }
     }
@@ -311,6 +316,80 @@ struct ProblemsList: View {
                 .buttonStyle(.plain)
             }
             .listStyle(.plain)
+        }
+    }
+}
+
+struct REPLView: View {
+    @Environment(Workspace.self) private var workspace
+    @State private var input = ""
+    @State private var history: [String] = []
+    @State private var historyIndex: Int?
+    @FocusState private var inputFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(workspace.replOutput.isEmpty
+                             ? "Type Python below and press ↩ — or select code in the editor and press ⌃↩ to send it."
+                             : workspace.replOutput)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(workspace.replOutput.isEmpty ? .secondary : .primary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                }
+                .onChange(of: workspace.replOutput) { proxy.scrollTo("end", anchor: .bottom) }
+            }
+            Divider()
+            HStack(spacing: 6) {
+                Text(">>>").font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
+                TextField("Python expression or statement", text: $input)
+                    .textFieldStyle(.plain)
+                    .font(.system(.body, design: .monospaced))
+                    .focused($inputFocused)
+                    .onSubmit(submit)
+                    .onKeyPress(.upArrow) { recall(-1); return .handled }
+                    .onKeyPress(.downArrow) { recall(1); return .handled }
+                Button { workspace.interruptREPL() } label: { Image(systemName: "stop.circle") }
+                    .buttonStyle(.borderless).help("Interrupt (KeyboardInterrupt)")
+                    .disabled(!workspace.isREPLRunning)
+                Button { workspace.restartREPL() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Restart REPL")
+                Button { workspace.clearREPL() } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless).help("Clear")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+        }
+        .onAppear {
+            workspace.startREPL()
+            inputFocused = true
+        }
+    }
+
+    private func submit() {
+        let line = input
+        if !line.trimmingCharacters(in: .whitespaces).isEmpty, history.last != line { history.append(line) }
+        historyIndex = nil
+        input = ""
+        workspace.sendREPLLine(line)
+        inputFocused = true
+    }
+
+    private func recall(_ delta: Int) {
+        guard !history.isEmpty else { return }
+        let next = (historyIndex ?? history.count) + delta
+        if next >= history.count {
+            historyIndex = nil
+            input = ""
+        } else {
+            historyIndex = max(next, 0)
+            input = history[historyIndex!]
         }
     }
 }
