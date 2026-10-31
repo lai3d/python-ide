@@ -39,7 +39,7 @@ struct CodeEditorView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = EditorScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
@@ -217,7 +217,7 @@ struct CodeEditorView: NSViewRepresentable {
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             } else {
                 textView.setSelectedRange(NSRange(location: 0, length: 0))
-                textView.scrollToBeginningOfDocument(nil)
+                (scrollView as? EditorScrollView)?.scrollToTopLeft() ?? textView.scrollToBeginningOfDocument(nil)
             }
         }
 
@@ -746,5 +746,32 @@ final class CodeTextView: NSTextView {
             if rect.width > 0, rect.insetBy(dx: -0.5, dy: -0.5).contains(screenPoint) { return candidate }
         }
         return nil
+    }
+}
+
+/// On macOS 14+ a scroll view's ruler overlays the content: the clip view gets a left
+/// `contentInsets` equal to the ruler width, so "scrolled to the left edge" means a bounds
+/// origin of -inset, not 0. The inset arrives after the text is loaded, which would leave the
+/// first characters of every line hidden under the line numbers. Keep the view pinned to the
+/// real left edge when the inset changes.
+final class EditorScrollView: NSScrollView {
+    private var appliedLeftInset: CGFloat = 0
+
+    override func tile() {
+        let wasAtLeftEdge = abs(contentView.bounds.minX + appliedLeftInset) < 0.5
+        super.tile()
+        let inset = contentView.contentInsets.left
+        guard abs(inset - appliedLeftInset) > 0.5 else { return }
+        appliedLeftInset = inset
+        if wasAtLeftEdge {
+            contentView.scroll(to: NSPoint(x: -inset, y: contentView.bounds.minY))
+            reflectScrolledClipView(contentView)
+        }
+    }
+
+    func scrollToTopLeft() {
+        let insets = contentView.contentInsets
+        contentView.scroll(to: NSPoint(x: -insets.left, y: -insets.top))
+        reflectScrolledClipView(contentView)
     }
 }
