@@ -212,6 +212,8 @@ final class Workspace {
         guard confirmDiscardOrSave(documents.filter(\.isDirty)) else { return }
         stopDebugging()
         debugSession = nil
+        for id in notebookKernels.keys { stopKernel(documentID: id) }
+        notebookModels = [:]
         breakpoints = [:]
         stopREPL()
         replOutput = ""
@@ -229,7 +231,8 @@ final class Workspace {
         output = ""
         backStack = []
         let preferred = ["main.py", "__main__.py", "app.py"].lazy.compactMap { Self.firstFile(named: $0, in: self.fileTree) }.first
-        if let first = preferred ?? Self.firstPythonFile(in: fileTree) {
+        if let first = preferred ?? Self.firstPythonFile(in: fileTree)
+            ?? fileTree.first(where: { !$0.isDirectory && $0.url.pathExtension == "ipynb" })?.url {
             openFile(first)
         }
         await startLanguageServer(root: url)
@@ -299,6 +302,8 @@ final class Workspace {
         guard confirmDiscardOrSave([documents[index]]) else { return }
         let closing = documents.remove(at: index)
         sendDidClose(closing)
+        stopKernel(documentID: closing.id)
+        notebookModels.removeValue(forKey: closing.id)
         for server in serverDiagnostics.keys { serverDiagnostics[server]?.removeValue(forKey: closing.id) }
         if currentFile.map(Self.key(for:)) == closing.id {
             currentFile = documents.isEmpty ? nil : documents[min(index, documents.count - 1)].url
@@ -405,6 +410,7 @@ final class Workspace {
 
     @discardableResult
     private func save(at index: Int) -> Bool {
+        notebookModels[documents[index].id]?.flush()
         let document = documents[index]
         guard !isReadOnly(document.url) else { return false }
         do {
@@ -1230,6 +1236,130 @@ final class Workspace {
         let ok = status == 0 && DebugpyLocator.isInstalledInSupportDirectory
         appendOutput(ok ? "\ndebugpy installed.\n" : "\nInstalling debugpy failed (status \(status)).\n")
         return ok
+    }
+
+    // MARK: - Notebooks
+
+    @ObservationIgnored private var notebookModels: [String: NotebookModel] = [:]
+    @ObservationIgnored private var notebookKernels: [String: NotebookKernel] = [:]
+    /// Per notebook: kernel run ID → cell.
+    @ObservationIgnored private var notebookRuns: [String: [Int: UUID]] = [:]
+
+    /// The editable model for the current notebook (rebuilt if its JSON was edited directly).
+    func notebookModel() -> Result<NotebookModel, Error>? {
+        guard isNotebook, let index = currentIndex else { return nil }
+        let document = documents[index]
+        if let model = notebookModels[document.id], model.lastSerialized == document.text { return .success(model) }
+        do {
+            let model = try NotebookModel(documentID: document.id, text: document.text)
+            model.onSerialize = { [weak self] text in
+                guard let self, let i = self.documents.firstIndex(where: { $0.id == document.id }) else { return }
+                self.setText(text, at: i)
+            }
+            if let old = notebookModels[document.id] { model.kernelStatus = old.kernelStatus }
+            notebookModels[document.id] = model
+            return .success(model)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    func runCells(_ ids: [UUID], in model: NotebookModel) {
+        let code = ids.compactMap { id in model.index(of: id).map { model.cells[$0] } }.filter { $0.kind == .code }
+        guard !code.isEmpty, let kernel = kernel(for: model) else { return }
+        for cell in code {
+            model.markQueued(cell.id)
+            let runID = kernel.execute(cell.source)
+            notebookRuns[model.documentID, default: [:]][runID] = cell.id
+        }
+        model.kernelStatus = .busy
+    }
+
+    func runAllCells(in model: NotebookModel) {
+        runCells(model.cells.map(\.id), in: model)
+    }
+
+    func interruptKernel(for model: NotebookModel) {
+        notebookKernels[model.documentID]?.interrupt()
+    }
+
+    func restartKernel(for model: NotebookModel) {
+        stopKernel(documentID: model.documentID)
+        model.resetStates()
+        _ = kernel(for: model)
+    }
+
+    private func kernel(for model: NotebookModel) -> NotebookKernel? {
+        let id = model.documentID
+        if let kernel = notebookKernels[id], kernel.isRunning { return kernel }
+        guard let python = interpreter else {
+            model.kernelStatus = .dead("No Python interpreter — choose one in the status bar")
+            return nil
+        }
+        let kernel = NotebookKernel()
+        kernel.onEvent = { [weak self, weak model] event in
+            Task { @MainActor in
+                guard let self, let model, self.notebookKernels[id] === kernel else { return }
+                self.handle(event, model: model)
+            }
+        }
+        let directory = documents.first { $0.id == id }?.url.deletingLastPathComponent() ?? rootURL
+        do {
+            try kernel.start(interpreter: python, environment: ToolLocator.environment(interpreter: python),
+                             currentDirectory: directory)
+        } catch {
+            model.kernelStatus = .dead("Kernel failed to start: \(error.localizedDescription)")
+            return nil
+        }
+        notebookKernels[id] = kernel
+        notebookRuns[id] = [:]
+        model.kernelStatus = .idle
+        return kernel
+    }
+
+    private func handle(_ event: NotebookKernel.Event, model: NotebookModel) {
+        let id = model.documentID
+        switch event {
+        case .output(let runID, let output):
+            if let cell = notebookRuns[id]?[runID] { model.append(output, to: cell) }
+        case .done(let runID, let count):
+            if let cell = notebookRuns[id]?.removeValue(forKey: runID) { model.finish(cell, executionCount: count) }
+            if notebookRuns[id]?.isEmpty ?? true { model.kernelStatus = .idle }
+        case .inputRequest(let prompt):
+            let value = Self.promptForInput(prompt)
+            notebookKernels[id]?.sendInput(value ?? "")
+        case .rawOutput(let text):
+            // Writes that bypass sys.stdout (C extensions, subprocesses) go to the running cell.
+            if let runID = notebookRuns[id]?.keys.min(), let cell = notebookRuns[id]?[runID] {
+                model.append(["output_type": "stream", "name": "stderr", "text": .string(text)], to: cell)
+            }
+        case .exited(let status):
+            notebookKernels[id] = nil
+            notebookRuns[id] = [:]
+            model.resetStates()
+            model.kernelStatus = .dead("Kernel exited (status \(status)) — run a cell to start a new one")
+        }
+    }
+
+    private func stopKernel(documentID: String) {
+        guard let kernel = notebookKernels.removeValue(forKey: documentID) else { return }
+        kernel.onEvent = nil
+        kernel.stop()
+        notebookRuns[documentID] = [:]
+        notebookModels[documentID]?.kernelStatus = .none
+    }
+
+    private static func promptForInput(_ prompt: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "The notebook is asking for input"
+        alert.informativeText = prompt.isEmpty ? "input()" : prompt
+        let field = NSTextField(string: "")
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Send")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        return alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil
     }
 
     // MARK: - REPL

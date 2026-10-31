@@ -183,8 +183,7 @@ struct EditorArea: View {
                 EditorHeader()
                 Divider()
                 if workspace.isNotebook && !workspace.showNotebookJSON {
-                    NotebookView(documentID: workspace.currentDocumentID, version: workspace.currentVersion,
-                                 text: workspace.text)
+                    NotebookView(documentID: workspace.currentDocumentID, version: workspace.currentVersion)
                 } else if workspace.currentFile != nil {
                     CodeEditorView(
                         documentID: workspace.currentDocumentID,

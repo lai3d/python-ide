@@ -51,12 +51,12 @@ public struct Notebook: Sendable, Hashable {
     }
 
     /// nbformat stores multiline strings either as one string or as a list of lines.
-    static func joined(_ value: JSONValue?) -> String {
+    public static func joined(_ value: JSONValue?) -> String {
         if let s = value?.stringValue { return s }
         return (value?.arrayValue ?? []).compactMap(\.stringValue).joined()
     }
 
-    private static func parseOutput(_ output: JSONValue) -> Output? {
+    public static func parseOutput(_ output: JSONValue) -> Output? {
         switch output["output_type"]?.stringValue {
         case "stream":
             return .text(joined(output["text"]), isError: output["name"]?.stringValue == "stderr")
